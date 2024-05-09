@@ -46,7 +46,8 @@ class ParamGroup:
 
 class ModelParams(ParamGroup): 
     def __init__(self, parser, sentinel=False):
-        self.sh_degree = 3
+        self.sh_degree = 1
+        self.ref_sh_degree = 3
         self._source_path = ""
         self._model_path = ""
         self._images = "images"
@@ -89,17 +90,42 @@ class OptimizationParams(ParamGroup):
         self.rotation_lr = 0.001
         self.appearance_embeddings_lr = 0.001
         self.appearance_network_lr = 0.001
+        self.densify_grad_threshold = 0.0002
+        self.densify_sdf_grad_threshold = 0.001
         self.percent_dense = 0.01
-        self.lambda_dssim = 0.2
-        self.lambda_distortion = 100
-        self.lambda_depth_normal = 0.05
+        
         self.distortion_from_iter = 15000
         self.depth_normal_from_iter = 15000
         self.densification_interval = 100
         self.opacity_reset_interval = 3000
         self.densify_from_iter = 500
         self.densify_until_iter = 15_000
-        self.densify_grad_threshold = 0.0002
+    
+        self.lambda_dssim = 0.2
+        self.lambda_distortion = 100
+        self.lambda_depth_normal = 0.05
+        self.lambda_fs = 0.2
+        self.lambda_sdf = 0.2
+        self.lambda_smooth_loss = 0.2
+        self.lambda_eik_loss = 0.2
+        self.lambda_normal = 0.2
+        self.lambda_orientation_loss = 0.2
+
+        self.network = {}
+        self.network['hidden_dim'] = 16
+        self.network['variance_network'] = 0.3
+        self.network['pos'] = {}
+        self.network['pos']['method'] = 'OneBlob'
+        self.network['pos']['n_bins'] = 8
+        self.network['grid'] = {}
+        self.network['grid']['method'] = 'HashGrid'
+        self.network['grid']['hash_size'] = 14
+        self.network['grid']['voxel_size'] = 0.01
+        self.network['density'] = {}
+        self.network['density']['params_init'] = {}
+        self.network['density']['beta_min'] = 0.0001
+        self.network['density']['params_init']['beta'] = 0.1
+
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):

@@ -20,6 +20,11 @@ def l1_loss(network_output, gt):
 def l2_loss(network_output, gt):
     return ((network_output - gt) ** 2).mean()
 
+def tv_loss(map):
+    horizontal_diff = torch.abs(map[:, :-1] - map[:, 1:])
+    vertical_diff = torch.abs(map[:-1, :] - map[1:, :])
+    return horizontal_diff.mean() + vertical_diff.mean()
+
 def gaussian(window_size, sigma):
     gauss = torch.Tensor([exp(-(x - window_size // 2) ** 2 / float(2 * sigma ** 2)) for x in range(window_size)])
     return gauss / gauss.sum()
@@ -61,4 +66,112 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
         return ssim_map.mean()
     else:
         return ssim_map.mean(1).mean(1).mean(1)
+    
+def sdf2weights(sdf, z_vals, trunc=0.1, sc_factor=1):
+    '''
+    Convert signed distance function to weights.
+
+    Params:
+        sdf: [N_rays, N_samples]
+        z_vals: [N_rays, N_samples]
+    Returns:
+        weights: [N_rays, N_samples]
+    '''
+    weights = torch.sigmoid(sdf / trunc) * torch.sigmoid(-sdf / trunc)
+
+    signs = sdf[:, 1:] * sdf[:, :-1]
+    mask = torch.where(signs < 0.0, torch.ones_like(signs), torch.zeros_like(signs))
+    inds = torch.argmax(mask, axis=1)
+    inds = inds[..., None]
+    z_min = torch.gather(z_vals, 1, inds) # The first surface
+    mask = torch.where(z_vals < z_min + sc_factor * trunc, torch.ones_like(z_vals), torch.zeros_like(z_vals))
+
+    weights = weights * mask
+    return weights / (torch.sum(weights, axis=-1, keepdims=True) + 1e-8)
+
+
+def get_masks(z_vals, target_d, truncation):
+    '''
+    Params:
+        z_vals: torch.Tensor, (Bs, N_samples)
+        target_d: torch.Tensor, (Bs,)
+        truncation: float
+    Return:
+        front_mask: torch.Tensor, (Bs, N_samples)
+        sdf_mask: torch.Tensor, (Bs, N_samples)
+        fs_weight: float
+        sdf_weight: float
+    '''
+
+    # before truncation
+    front_mask = torch.where(z_vals < (target_d - truncation), torch.ones_like(z_vals), torch.zeros_like(z_vals))
+    # after truncation
+    back_mask = torch.where(z_vals > (target_d + truncation), torch.ones_like(z_vals), torch.zeros_like(z_vals))
+    # valid mask
+    depth_mask = torch.where(target_d > 0.0, torch.ones_like(target_d), torch.zeros_like(target_d))
+    # Valid sdf regionn
+    sdf_mask = (1.0 - front_mask) * (1.0 - back_mask) * depth_mask
+
+    return front_mask, sdf_mask
+
+def compute_loss(prediction, target, loss_type='l2'):
+    '''
+    Params: 
+        prediction: torch.Tensor, (Bs, N_samples)
+        target: torch.Tensor, (Bs, N_samples)
+        loss_type: str
+    Return:
+        loss: torch.Tensor, (1,)
+    '''
+
+    if loss_type == 'l2':
+        return F.mse_loss(prediction, target)
+    elif loss_type == 'l1':
+        return F.l1_loss(prediction, target)
+
+    raise Exception('Unsupported loss type')
+    
+
+
+def get_loss(render_pkg, opt, loss_type='l1'):
+    '''
+    Params:
+        z_vals: torch.Tensor, (Bs, N_samples)
+        target_d: torch.Tensor, (Bs,)
+        predicted_sdf: torch.Tensor, (Bs, N_samples)
+        truncation: float
+    Return:
+        fs_loss: torch.Tensor, (1,)
+        sdf_loss: torch.Tensor, (1,)
+        eikonal_loss: torch.Tensor, (1,)
+    '''
+
+    min_scales = render_pkg["min_scales"]
+    depth_map = render_pkg["depth_map"]
+    gaussian_sdf, disk_sdf = render_pkg["gaussian_sdf"], render_pkg["disk_sdf"]
+    gaussian_normal, sdf_gradient, dirs = render_pkg["gaussian_normal"], render_pkg["sdf_gradient"], render_pkg["dir_pp_normalized"]
+    gaussian_sdf2normal = sdf_gradient / torch.norm(sdf_gradient, dim=-1)
+    
+    volume_fs_loss, volume_sdf_loss, volume_depth_loss = render_pkg["volume_fs_loss"], render_pkg["volume_sdf_loss"], render_pkg["volume_depth_loss"]
+    
+    # gaussian normal loss
+    normal_loss = (torch.abs(gaussian_normal - gaussian_sdf2normal)).mean() + (torch.abs((1 - torch.sum(gaussian_normal*gaussian_sdf2normal, dim=-1)))).mean()
+    # eikonal loss
+    eikonal_loss = ((gaussian_sdf2normal.norm(2, dim=-1) - 1) ** 2).sum()
+    # gaussian sdf loss
+    sdf_loss = F.l1_loss(gaussian_sdf) + F.l1_loss(disk_sdf)
+
+    # depth smooth loss
+    depth_smooth_loss = tv_loss(depth_map)
+
+    # minimum scale loss
+    min_scale_loss = F.l1_loss(min_scales)
+
+    loss = opt.free_space_weight * volume_fs_loss + opt.volume_sdf_weight * volume_sdf_loss + opt.volume_depth_weight * volume_depth_loss +\
+           opt.gaussian_normal_weight * normal_loss + opt.eki_weight * eikonal_loss + opt.sdf_weight * sdf_loss +\
+           opt.depth_smooth_weight * depth_smooth_loss + opt.scale_weight * min_scale_loss
+
+    return loss
+
+
 
