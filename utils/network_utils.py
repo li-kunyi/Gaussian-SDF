@@ -233,7 +233,7 @@ class BellDensity(Density):  # alpha * Laplace(loc=0, scale=beta).cdf(-sdf)
         if beta is None:
             beta = self.get_beta()
 
-        return torch.exp(-beta * sdf) / (1 + torch.exp(-beta * sdf)) ** 2
+        return beta*torch.exp(-beta * sdf) / (1 + torch.exp(-beta * sdf)) ** 2
 
     def get_beta(self):
         beta = self.beta + self.beta_min

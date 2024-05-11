@@ -125,13 +125,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if (iteration - 1) == debug_from:
             pipe.debug = True
 
-        if iteration >= 5000:
+        if iteration >= 1000:
             mlp = specular
             opt_opacity = False
-            if iteration == 5000:
+            if iteration == 1000:
                 gaussians.training_reset(opt)
             mlp_warm_up = False
-        elif iteration < 5000 and iteration > 500:
+        elif iteration < 1000 and iteration > 500:
             mlp = specular
             opt_opacity = True
             mlp_warm_up = True
@@ -272,11 +272,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                     sdf_th = max((0.2 - np.exp(iteration/3000)/2.7), 0.1)
-                    if mlp_warm_up == False:
+                    if mlp_warm_up == False and not mlp == None:
                         sdf_value = gaussian_sdf
                     else:
                         sdf_value = None
-                    sdf_value = None
+                    # sdf_value = None
 
                     gaussians.densify_and_prune(opt.densify_grad_threshold, 0.05, scene.cameras_extent, size_threshold, sdf_th=sdf_th, sdf_value=sdf_value, sdf_gradient=sdf_gradient_value, opt_opacity=opt_opacity)
                     # gaussians.compute_3D_filter(cameras=trainCameras)

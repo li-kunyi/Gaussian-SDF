@@ -178,7 +178,7 @@ def get_values(mlp, dir_pp, reflect_normals, rays_o, min_scales, num_process=100
     rays_o = rays_o.repeat(batch_size, 1)
     pts = rays_o + rays_d * z_vals[:, None]  # n_rays, n_samples, 3
         
-    # opacity = []
+    opacity = []
     sdf = []
     sdf_gradient = []
     sh = []
@@ -187,25 +187,25 @@ def get_values(mlp, dir_pp, reflect_normals, rays_o, min_scales, num_process=100
         end = min(batch_size, (i + 1) * num_process)
         if end - start > 0:
             _alpha, _sdf, _gradient, _sh = mlp.query_sdf_gradient_sh(pts[start:end], reflect_normals[start:end])
-            # opacity.append(_alpha)
+            opacity.append(_alpha)
             sdf.append(_sdf)
             sdf_gradient.append(_gradient)
             sh.append(_sh)
 
-    # opacity = torch.cat(opacity, dim=0).to(device)
+    opacity = torch.cat(opacity, dim=0).to(device)
     sdf = torch.cat(sdf, dim=0).to(device)
     sdf_gradient = torch.cat(sdf_gradient, dim=0).to(device)
     sh = torch.cat(sh, dim=0).to(device)
 
-    # Estimate opacity from sdf
-    estimated_next_sdf = sdf.squeeze(-1) - min_scales * 0.5
-    estimated_prev_sdf = sdf.squeeze(-1) + min_scales * 0.5
-    prev_cdf = torch.sigmoid(estimated_prev_sdf)
-    next_cdf = torch.sigmoid(estimated_next_sdf)
-    p = prev_cdf - next_cdf
-    c = prev_cdf
-    opacity = ((p + 1e-5) / (c + 1e-5)).clip(0.0, 1.0)
-    opacity = opacity.unsqueeze(-1)
+    # # Estimate opacity from sdf
+    # estimated_next_sdf = sdf.squeeze(-1) - min_scales * 0.5
+    # estimated_prev_sdf = sdf.squeeze(-1) + min_scales * 0.5
+    # prev_cdf = torch.sigmoid(estimated_prev_sdf)
+    # next_cdf = torch.sigmoid(estimated_next_sdf)
+    # p = prev_cdf - next_cdf
+    # c = prev_cdf
+    # opacity = ((p + 1e-5) / (c + 1e-5)).clip(0.0, 1.0)
+    # opacity = opacity.unsqueeze(-1)
 
     return opacity, sdf, sdf_gradient, sh
 
@@ -228,9 +228,10 @@ def volume_rendering(mlp, camera, depth, n_sample=0, n_sample_surface=11, num_pr
     H, W = depth.shape
     fx = W / (2 * math.tan(camera.FoVx  / 2))
     fy = H / (2 * math.tan(camera.FoVy  / 2))
-    R = torch.tensor(camera.R, device=device, dtype=torch.float32)
-    T = torch.tensor(camera.T, device=device, dtype=torch.float32)
-    
+    w2c = camera.world_view_transform.T
+    c2w = torch.linalg.inv(w2c)
+    R = c2w[:3, :3]
+    T = c2w[:3, 3]
     
     if full_image:
         rays_o, rays_d = get_all_rays(H, W, fx, fy, (W-1)/2, (H-1)/2, R, T, device)
@@ -244,31 +245,31 @@ def volume_rendering(mlp, camera, depth, n_sample=0, n_sample_surface=11, num_pr
     z_vals = sample_along_rays(depth_sp, n_sample, n_sample_surface, device)  # [n_pixels, n_samples]
 
     dists = z_vals[..., 1:] - z_vals[..., :-1]
-    _dists = torch.cat([dists, dists[:, -2:-1]], -1)
-    mid_z_vals = z_vals + _dists * 0.5
-    pts = rays_o[:, None, :] + rays_d[:, None, :] * mid_z_vals[..., :, None]  # n_rays, n_samples, 3
+    # _dists = torch.cat([dists, dists[:, -2:-1]], -1)
+    # mid_z_vals = z_vals + _dists * 0.5
+    pts = rays_o[:, None, :] + rays_d[:, None, :] * z_vals[..., :, None]  # n_rays, n_samples, 3
     
     batch_size, n_sample, c = pts.shape
     sdf = []
-    # opacity = []
+    opacity = []
     for i in range(batch_size // num_process + 1):
         start = i * num_process
         end = min(batch_size, (i + 1) * num_process)
         if end - start > 0:
             _opacity, _sdf = mlp.query_alpha_sdf(pts[start:end].reshape(-1, c))
-            # opacity.append(_opacity.reshape(-1, n_sample))
+            opacity.append(_opacity.reshape(-1, n_sample))
             sdf.append(_sdf.reshape(-1, 1))
-    # opacity = torch.cat(opacity, dim=0).to(device)        
+    opacity = torch.cat(opacity, dim=0).to(device)        
     sdf = torch.cat(sdf, dim=0).to(device)
 
-    estimated_next_sdf = sdf - _dists.reshape(-1, 1) * 0.5
-    estimated_prev_sdf = sdf + _dists.reshape(-1, 1) * 0.5
-    prev_cdf = torch.sigmoid(estimated_prev_sdf)
-    next_cdf = torch.sigmoid(estimated_next_sdf)
-    p = prev_cdf - next_cdf
-    c = prev_cdf
+    # estimated_next_sdf = sdf - _dists.reshape(-1, 1) * 0.5
+    # estimated_prev_sdf = sdf + _dists.reshape(-1, 1) * 0.5
+    # prev_cdf = torch.sigmoid(estimated_prev_sdf)
+    # next_cdf = torch.sigmoid(estimated_next_sdf)
+    # p = prev_cdf - next_cdf
+    # c = prev_cdf
 
-    opacity = ((p + 1e-5) / (c + 1e-5)).reshape(batch_size, n_sample).clip(0.0, 1.0)
+    # opacity = ((p + 1e-5) / (c + 1e-5)).reshape(batch_size, n_sample).clip(0.0, 1.0)
     sdf = sdf.reshape(batch_size, n_sample)
 
     dists = z_vals[:, 1:] - z_vals[:, :-1]

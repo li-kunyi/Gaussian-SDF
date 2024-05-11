@@ -111,11 +111,11 @@ class OptimizationParams(ParamGroup):
         self.lambda_volume_depth = 100.0
         self.lambda_gaussian_normal = 0.1
         self.lambda_eik_loss = 0.001
-        self.lambda_sdf = 100.0
-        self.lambda_depth_smooth = 0.05
-        self.lambda_scale = 0.001
+        self.lambda_sdf = 10.0
+        self.lambda_depth_smooth = 0.0
+        self.lambda_scale = 0.00
         self.lambda_mlp_smooth = 0.001
-        self.lambda_opacity = 1000.
+        self.lambda_opacity = 100.
 
         self.network = {}
         self.network['hidden_dim'] = 32
