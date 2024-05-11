@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from utils.network_utils import SDF, BellDensity, Pos_Encoding, Dir_Encoding, SH
+from utils.network_utils import SDF, LaplaceDensity, BellDensity, Pos_Encoding, Dir_Encoding, SH
 import os
 import numpy as np
 from utils.system_utils import searchForMaxIteration
@@ -9,29 +9,26 @@ from utils.general_utils import get_expon_lr_func, get_linear_noise_func, coordi
 
 class Model(nn.Module):
     def __init__(self, cfg, bounding_box, sh_out_dim):
-        super().__init__()
-
-        self.sdf = SDF(cfg, bounding_box)
-        self.optimizer = None
-
-        self.sdf2opacity = BellDensity(**cfg['density'])
-
+        super().__init__()     
         self.pos_embed = Pos_Encoding(cfg, bounding_box)
         self.pe_dim = self.pos_embed.pe_dim
         self.grid_dim = self.pos_embed.grid_dim
 
         self.query_sdf = SDF(pts_dim=self.pe_dim, hidden_dim=cfg['hidden_dim'], feature_dim=self.grid_dim)
 
+        self.sdf2opacity = BellDensity(**cfg['density'])
+
         self.dir_embed = Dir_Encoding(3, 32)
-        self.query_sh = SH(32 + self.pe_dim + self.grid_dim, sh_out_dim)
+        self.query_sh = SH(32 + self.pe_dim + self.grid_dim, sh_out_dim * 3)
     
 
 class SpecModel:
     def __init__(self, cfg, xyz, ref_sh_degree):
         self.cfg = cfg
-        self.set_bbox(xyz, enlarge=1.2)
+        self.set_bbox(xyz, enlarge=1.02)
 
-        self.specular = Model(cfg, self.bounding_box, (ref_sh_degree + 1) ** 2)
+        self.specular = Model(cfg, self.bounding_box, (ref_sh_degree + 1) ** 2).cuda()
+        self.optimizer = None
 
 
     def set_bbox(self, point_cloud, enlarge=1.0):
@@ -113,10 +110,10 @@ class SpecModel:
         k3 = torch.tensor([-1, 1, -1], dtype=x.dtype, device=x.device)  
         k4 = torch.tensor([1, 1, 1], dtype=x.dtype, device=x.device)  
         
-        sdf1 = self.specular(x + k1 * eps)
-        sdf2 = self.specular(x + k2 * eps)
-        sdf3 = self.specular(x + k3 * eps)
-        sdf4 = self.specular(x + k4 * eps)
+        sdf1 = self.query_sdf(x + k1 * eps)
+        sdf2 = self.query_sdf(x + k2 * eps)
+        sdf3 = self.query_sdf(x + k3 * eps)
+        sdf4 = self.query_sdf(x + k4 * eps)
         gradients = (k1*sdf1 + k2*sdf2 + k3*sdf3 + k4*sdf4) / (4.0 * eps)
 
         # rotation_matrix = torch.tensor([[-1, 0, 0],
@@ -128,14 +125,14 @@ class SpecModel:
 
     def train_setting(self, training_args):
         l = [
-            {'params': list(self.parameters()),
-             'lr': training_args.feature_lr / 10,
+            {'params': list(self.specular.parameters()),
+             'lr': training_args.network_feature_lr / 10,
              "name": "specular"}
         ]
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
 
-        self.specular_scheduler_args = get_linear_noise_func(lr_init=training_args.feature_lr,
-                                                             lr_final=training_args.feature_lr / 20,
+        self.specular_scheduler_args = get_linear_noise_func(lr_init=training_args.network_feature_lr,
+                                                             lr_final=training_args.network_feature_lr / 20,
                                                              lr_delay_mult=training_args.position_lr_delay_mult,
                                                              max_steps=training_args.specular_lr_max_steps)
 

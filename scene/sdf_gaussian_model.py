@@ -45,6 +45,7 @@ class GaussianModel:
 
     def __init__(self, sh_degree : int, ref_sh_degree: int):
         self.active_sh_degree = 0
+        self.active_ref_sh_degree = ref_sh_degree
         self.max_sh_degree = sh_degree 
         self.max_ref_sh_degree = ref_sh_degree
         self._xyz = torch.empty(0)
@@ -148,8 +149,8 @@ class GaussianModel:
         coef = torch.sqrt(det1 / det2)
         return opacity * coef[..., None]
     
-    def set_opacity(self, opacity, visible_mask):
-        self._opacity[visible_mask] = self.inverse_opacity_activation(opacity)
+    def set_opacity(self, opacity):
+        self._opacity = self.inverse_opacity_activation(opacity)
 
     def get_sorted_axis(self):
         return get_sorted_axis(self.get_scaling, self.get_rotation)
@@ -313,11 +314,6 @@ class GaussianModel:
                                                     max_steps=training_args.position_lr_max_steps)
     
     def training_reset(self, training_args):
-        self.percent_dense = training_args.percent_dense
-        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.xyz_gradient_accum_abs = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.xyz_gradient_accum_abs_max = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.densify_sdf_grad_threshold = nn.Parameter(self.densify_sdf_grad_threshold.requires_grad_(True))
         self._opacity.requires_grad_(False)
 
@@ -444,17 +440,17 @@ class GaussianModel:
         current_opacity_with_filter = self.get_opacity_with_3D_filter
         opacities_new = torch.min(current_opacity_with_filter, torch.ones_like(current_opacity_with_filter)*0.01)
         
-        # apply 3D filter
-        scales = self.get_scaling
+        # # apply 3D filter
+        # scales = self.get_scaling
         
-        scales_square = torch.square(scales)
-        det1 = scales_square.prod(dim=1)
+        # scales_square = torch.square(scales)
+        # det1 = scales_square.prod(dim=1)
         
-        scales_after_square = scales_square + torch.square(self.filter_3D) 
-        det2 = scales_after_square.prod(dim=1) 
-        coef = torch.sqrt(det1 / det2)
-        opacities_new = opacities_new / coef[..., None]
-        opacities_new = self.inverse_opacity_activation(opacities_new)
+        # scales_after_square = scales_square + torch.square(self.filter_3D) 
+        # det2 = scales_after_square.prod(dim=1) 
+        # coef = torch.sqrt(det1 / det2)
+        # opacities_new = opacities_new / coef[..., None]
+        # opacities_new = self.inverse_opacity_activation(opacities_new)
 
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
@@ -540,19 +536,20 @@ class GaussianModel:
     def _prune_optimizer(self, mask):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
-            stored_state = self.optimizer.state.get(group['params'][0], None)
-            if stored_state is not None:
-                stored_state["exp_avg"] = stored_state["exp_avg"][mask]
-                stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][mask]
+            if not group["name"] == "sdf_grad":
+                stored_state = self.optimizer.state.get(group['params'][0], None)
+                if stored_state is not None:
+                    stored_state["exp_avg"] = stored_state["exp_avg"][mask]
+                    stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][mask]
 
-                del self.optimizer.state[group['params'][0]]
-                group["params"][0] = nn.Parameter((group["params"][0][mask].requires_grad_(True)))
-                self.optimizer.state[group['params'][0]] = stored_state
+                    del self.optimizer.state[group['params'][0]]
+                    group["params"][0] = nn.Parameter((group["params"][0][mask].requires_grad_(True)))
+                    self.optimizer.state[group['params'][0]] = stored_state
 
-                optimizable_tensors[group["name"]] = group["params"][0]
-            else:
-                group["params"][0] = nn.Parameter(group["params"][0][mask].requires_grad_(True))
-                optimizable_tensors[group["name"]] = group["params"][0]
+                    optimizable_tensors[group["name"]] = group["params"][0]
+                else:
+                    group["params"][0] = nn.Parameter(group["params"][0][mask].requires_grad_(True))
+                    optimizable_tensors[group["name"]] = group["params"][0]
         return optimizable_tensors
 
     def prune_points(self, mask, opt_opacity=True):
@@ -580,21 +577,22 @@ class GaussianModel:
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
             assert len(group["params"]) == 1
-            extension_tensor = tensors_dict[group["name"]]
-            stored_state = self.optimizer.state.get(group['params'][0], None)
-            if stored_state is not None:
+            if not group["name"] == "sdf_grad":
+                extension_tensor = tensors_dict[group["name"]]
+                stored_state = self.optimizer.state.get(group['params'][0], None)
+                if stored_state is not None:
 
-                stored_state["exp_avg"] = torch.cat((stored_state["exp_avg"], torch.zeros_like(extension_tensor)), dim=0)
-                stored_state["exp_avg_sq"] = torch.cat((stored_state["exp_avg_sq"], torch.zeros_like(extension_tensor)), dim=0)
+                    stored_state["exp_avg"] = torch.cat((stored_state["exp_avg"], torch.zeros_like(extension_tensor)), dim=0)
+                    stored_state["exp_avg_sq"] = torch.cat((stored_state["exp_avg_sq"], torch.zeros_like(extension_tensor)), dim=0)
 
-                del self.optimizer.state[group['params'][0]]
-                group["params"][0] = nn.Parameter(torch.cat((group["params"][0], extension_tensor), dim=0).requires_grad_(True))
-                self.optimizer.state[group['params'][0]] = stored_state
+                    del self.optimizer.state[group['params'][0]]
+                    group["params"][0] = nn.Parameter(torch.cat((group["params"][0], extension_tensor), dim=0).requires_grad_(True))
+                    self.optimizer.state[group['params'][0]] = stored_state
 
-                optimizable_tensors[group["name"]] = group["params"][0]
-            else:
-                group["params"][0] = nn.Parameter(torch.cat((group["params"][0], extension_tensor), dim=0).requires_grad_(True))
-                optimizable_tensors[group["name"]] = group["params"][0]
+                    optimizable_tensors[group["name"]] = group["params"][0]
+                else:
+                    group["params"][0] = nn.Parameter(torch.cat((group["params"][0], extension_tensor), dim=0).requires_grad_(True))
+                    optimizable_tensors[group["name"]] = group["params"][0]
 
         return optimizable_tensors
 
@@ -620,7 +618,7 @@ class GaussianModel:
         self._features_dc = optimizable_tensors["f_dc"]
         self._features_rest = optimizable_tensors["f_rest"]
         self._ref_features_dc = torch.cat((self._ref_features_dc, new_ref_features_dc), dim=0)
-        self._opacit_ref_features_resty = torch.cat((self._ref_features_rest, new_ref_features_rest), dim=0)
+        self._ref_features_rest = torch.cat((self._ref_features_rest, new_ref_features_rest), dim=0)
         if opt_opacity:
             self._opacity = optimizable_tensors["opacity"]
         else:
@@ -634,7 +632,7 @@ class GaussianModel:
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
-    def densify_and_split(self, grads, grad_threshold,  grads_abs, grad_abs_threshold, scene_extent, N=2, sdf_gradient=None, opt_opacity=True):
+    def densify_and_split(self, grads, grad_threshold,  grads_abs, grad_abs_threshold, scene_extent, N=2, opt_opacity=True):
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
         padded_grad = torch.zeros((n_init_points), device="cuda")
@@ -646,9 +644,6 @@ class GaussianModel:
         selected_pts_mask = torch.logical_or(selected_pts_mask, selected_pts_mask_abs)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
-        if not sdf_gradient == None:
-            selected_pts_mask = torch.logical_and(selected_pts_mask,
-                                                  torch.abs(sdf_gradient.grad) > self.densify_sdf_grad_threshold)
 
         stds = self.get_scaling[selected_pts_mask].repeat(N,1)
         means =torch.zeros((stds.size(0), 3),device="cuda")
@@ -666,7 +661,7 @@ class GaussianModel:
                                    new_opacity, new_scaling, new_rotation, opt_opacity=opt_opacity)
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
-        self.prune_points(prune_filter)
+        self.prune_points(prune_filter, opt_opacity=opt_opacity)
 
     def densify_and_clone(self, grads, grad_threshold,  grads_abs, grad_abs_threshold, scene_extent, sdf_gradient=None, opt_opacity=True):
         # Extract points that satisfy the gradient condition
@@ -677,7 +672,7 @@ class GaussianModel:
                                               torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
         if not sdf_gradient == None:
             selected_pts_mask = torch.logical_and(selected_pts_mask,
-                                                  torch.abs(sdf_gradient.grad) > self.densify_sdf_grad_threshold)
+                                                  torch.abs(sdf_gradient) > self.densify_sdf_grad_threshold)
         
         new_xyz = self._xyz[selected_pts_mask]
         # sample a new gaussian instead of fixing position
@@ -698,7 +693,7 @@ class GaussianModel:
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_ref_features_dc, new_ref_features_rest, 
                                    new_opacities, new_scaling, new_rotation, opt_opacity=opt_opacity)
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, sdf_gradient=None, opt_opacity=True):
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, sdf_value=None, sdf_th=0.5, sdf_gradient=None, opt_opacity=True):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
         
@@ -711,15 +706,20 @@ class GaussianModel:
         self.densify_and_clone(grads, max_grad, grads_abs, Q, extent, sdf_gradient=sdf_gradient, opt_opacity=opt_opacity)
         clone = self._xyz.shape[0]
         
-        self.densify_and_split(grads, max_grad, grads_abs, Q, extent, sdf_gradient=sdf_gradient, opt_opacity=opt_opacity)
+        self.densify_and_split(grads, max_grad, grads_abs, Q, extent, opt_opacity=opt_opacity)
         split = self._xyz.shape[0]
         
         prune_mask = (self.get_opacity < min_opacity).squeeze()
+        if not sdf_value == None:
+            front_mask = sdf_value > sdf_th
+            back_mask = sdf_value < sdf_th
+            sdf_mask = torch.logical_or(front_mask, back_mask)
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
-        self.prune_points(prune_mask)
+            prune_mask = torch.logical_or(prune_mask, sdf_mask)
+        self.prune_points(prune_mask, opt_opacity=opt_opacity)
         prune = self._xyz.shape[0]
         # torch.cuda.empty_cache()
         return clone - before, split - clone, split - prune

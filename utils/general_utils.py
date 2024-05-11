@@ -132,6 +132,41 @@ def safe_state(silent):
     torch.manual_seed(0)
     torch.cuda.set_device(torch.device("cuda:0"))
 
+def get_linear_noise_func(
+        lr_init, lr_final, lr_delay_steps=0, lr_delay_mult=1.0, max_steps=1000000
+):
+    """
+    Copied from Plenoxels
+
+    Continuous learning rate decay function. Adapted from JaxNeRF
+    The returned rate is lr_init when step=0 and lr_final when step=max_steps, and
+    is log-linearly interpolated elsewhere (equivalent to exponential decay).
+    If lr_delay_steps>0 then the learning rate will be scaled by some smooth
+    function of lr_delay_mult, such that the initial learning rate is
+    lr_init*lr_delay_mult at the beginning of optimization but will be eased back
+    to the normal learning rate when steps>lr_delay_steps.
+    :param conf: config subtree 'lr' or similar
+    :param max_steps: int, the number of steps during optimization.
+    :return HoF which takes step as input
+    """
+
+    def helper(step):
+        if step < 0 or (lr_init == 0.0 and lr_final == 0.0):
+            # Disable this parameter
+            return 0.0
+        if lr_delay_steps > 0:
+            # A kind of reverse cosine decay.
+            delay_rate = lr_delay_mult + (1 - lr_delay_mult) * np.sin(
+                0.5 * np.pi * np.clip(step / lr_delay_steps, 0, 1)
+            )
+        else:
+            delay_rate = 1.0
+        t = np.clip(step / max_steps, 0, 1)
+        log_lerp = lr_init * (1 - t) + lr_final * t
+        return delay_rate * log_lerp
+
+    return helper
+
 
 def get_minimum_axis(scales, rotations):
     sorted_idx = torch.argsort(scales, descending=False, dim=-1)
@@ -282,6 +317,24 @@ def get_sample_uv(H0, H1, W0, W1, n, color, device='cuda:0'):
     i, j, color = select_uv(i, j, n, color, device=device)
     return i, j, color
 
+def get_all_rays(H, W, fx, fy, cx, cy, R, T, device):
+    """
+    Get rays for a whole image.
+
+    """
+    # pytorch's meshgrid has indexing='ij'
+    i, j = torch.meshgrid(torch.linspace(0, W-1, W), torch.linspace(0, H-1, H))
+    i = i.t()  # transpose
+    j = j.t()
+
+    dirs = torch.stack(
+        [(i-cx)/fx, -(j-cy)/fy, -torch.ones_like(i)], -1).to(device)
+    dirs = dirs.reshape(H, W, 1, 3)
+    # Rotate ray directions from camera frame to the world frame
+    # dot product, equals to: [c2w.dot(dir) for dir in dirs]
+    rays_d = torch.sum(dirs * R, -1)  # [H, W, 3]
+    rays_o = T.expand(rays_d.shape)
+    return rays_o, rays_d
 
 def get_samples(H, W, n, fx, fy, cx, cy, R, T, color, device):
     """
@@ -294,7 +347,7 @@ def get_samples(H, W, n, fx, fy, cx, cy, R, T, color, device):
     return rays_o, rays_d, sample_color
 
 
-def sample_along_rays(gt_depth, n_samples, n_surface, far_bb, device):
+def sample_along_rays(gt_depth, n_samples, n_surface, device):
     # [N, C]
     gt_depth = gt_depth.reshape(-1, 1)  # [n_pixels, 1]
     
@@ -321,7 +374,7 @@ def sample_along_rays(gt_depth, n_samples, n_surface, far_bb, device):
     # z_vals_near_surface[gt_none_zero_mask, :] = z_vals_surface_depth_none_zero
 
     # for those with zero depth, random sample along the space
-    near = 0.001
+    near = 0.1
     far = torch.max(gt_depth)
     t_vals_surface = torch.rand(n_surface).to(device)
     z_vals_surface_depth_zero = near * (1.-t_vals_surface) + far * (t_vals_surface)
@@ -332,7 +385,7 @@ def sample_along_rays(gt_depth, n_samples, n_surface, far_bb, device):
     if n_samples > 0:
         gt_depth_samples = gt_depth.repeat(1, n_samples)  # [n_pixels, n_samples]
         near = gt_depth_samples * 0.001
-        far = torch.clamp(far_bb, 0,  torch.max(gt_depth*1.2))
+        far = gt_depth_samples*1.2  # torch.max(gt_depth*1.2).repeat(1, n_samples)
         t_vals = torch.linspace(0., 1., steps=n_samples, device=device)
         z_vals = near * (1.-t_vals) + far * (t_vals)
 

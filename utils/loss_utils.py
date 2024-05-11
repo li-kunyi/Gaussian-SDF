@@ -133,7 +133,7 @@ def compute_loss(prediction, target, loss_type='l2'):
     
 
 
-def get_loss(render_pkg, opt, loss_type='l1'):
+def get_loss(render_pkg, opt, mlp_warm_up):
     '''
     Params:
         z_vals: torch.Tensor, (Bs, N_samples)
@@ -150,26 +150,35 @@ def get_loss(render_pkg, opt, loss_type='l1'):
     depth_map = render_pkg["depth_map"]
     gaussian_sdf, disk_sdf = render_pkg["gaussian_sdf"], render_pkg["disk_sdf"]
     gaussian_normal, sdf_gradient, dirs = render_pkg["gaussian_normal"], render_pkg["sdf_gradient"], render_pkg["dir_pp_normalized"]
-    gaussian_sdf2normal = sdf_gradient / torch.norm(sdf_gradient, dim=-1)
+    gaussian_sdf2normal = sdf_gradient / torch.norm(sdf_gradient, dim=-1)[:, None]
     
     volume_fs_loss, volume_sdf_loss, volume_depth_loss = render_pkg["volume_fs_loss"], render_pkg["volume_sdf_loss"], render_pkg["volume_depth_loss"]
     
     # gaussian normal loss
     normal_loss = (torch.abs(gaussian_normal - gaussian_sdf2normal)).mean() + (torch.abs((1 - torch.sum(gaussian_normal*gaussian_sdf2normal, dim=-1)))).mean()
     # eikonal loss
-    eikonal_loss = ((gaussian_sdf2normal.norm(2, dim=-1) - 1) ** 2).sum()
+    eikonal_loss = ((sdf_gradient.norm(2, dim=-1) - 1) ** 2).sum()
     # gaussian sdf loss
-    sdf_loss = F.l1_loss(gaussian_sdf) + F.l1_loss(disk_sdf)
+    sdf_loss = torch.abs(gaussian_sdf).mean() + torch.abs(disk_sdf).mean()
 
     # depth smooth loss
     depth_smooth_loss = tv_loss(depth_map)
 
     # minimum scale loss
-    min_scale_loss = F.l1_loss(min_scales)
+    min_scale_loss = torch.relu(min_scales).mean()
 
-    loss = opt.free_space_weight * volume_fs_loss + opt.volume_sdf_weight * volume_sdf_loss + opt.volume_depth_weight * volume_depth_loss +\
-           opt.gaussian_normal_weight * normal_loss + opt.eki_weight * eikonal_loss + opt.sdf_weight * sdf_loss +\
-           opt.depth_smooth_weight * depth_smooth_loss + opt.scale_weight * min_scale_loss
+    if mlp_warm_up:
+        gaussian_opacity = render_pkg["gaussian_opacity"]
+        mlp_opacity = render_pkg["mlp_opacity"]
+
+        opacity_loss = F.l1_loss(gaussian_opacity, mlp_opacity)
+        loss = opt.lambda_fs * volume_fs_loss + opt.lambda_vloume_sdf * volume_sdf_loss + opt.lambda_volume_depth * volume_depth_loss +\
+            opt.lambda_eik_loss * eikonal_loss + opt.lambda_sdf * sdf_loss +\
+            opt.lambda_depth_smooth * depth_smooth_loss + opt.lambda_scale * min_scale_loss + opt.lambda_opacity * opacity_loss
+    else:      
+        loss = opt.lambda_fs * volume_fs_loss + opt.lambda_vloume_sdf * volume_sdf_loss + opt.lambda_volume_depth * volume_depth_loss +\
+            opt.lambda_gaussian_normal * normal_loss + opt.lambda_eik_loss * eikonal_loss + opt.lambda_sdf * sdf_loss +\
+            opt.lambda_depth_smooth * depth_smooth_loss + opt.lambda_scale * min_scale_loss
 
     return loss
 

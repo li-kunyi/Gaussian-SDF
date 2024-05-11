@@ -74,7 +74,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
 
-    specular = SpecModel(opt.network, gaussians._xyz, dataset.ref_sh_degree).cuda()
+    specular = SpecModel(opt.network, gaussians._xyz, dataset.ref_sh_degree)
     specular.train_setting(opt)
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
@@ -90,10 +90,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         camera.idx = idx
 
     # highresolution index
-    highresolution_index = []
-    for index, camera in enumerate(trainCameras):
-        if camera.image_width >= 800:
-            highresolution_index.append(index)
+    # highresolution_index = []
+    # for index, camera in enumerate(trainCameras):
+    #     if camera.image_width >= 800:
+    #         highresolution_index.append(index)
 
     gaussians.compute_3D_filter(cameras=trainCameras)
 
@@ -115,26 +115,33 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if not viewpoint_stack:
             viewpoint_stack = scene.getTrainCameras().copy()
         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
+
         
-        # Pick a random high resolution camera
-        if random.random() < 0.3 and dataset.sample_more_highres:
-            viewpoint_cam = trainCameras[highresolution_index[randint(0, len(highresolution_index)-1)]]
+        # # Pick a random high resolution camera
+        # if random.random() < 0.3 and dataset.sample_more_highres:
+        #     viewpoint_cam = trainCameras[highresolution_index[randint(0, len(highresolution_index)-1)]]
             
         # Render
         if (iteration - 1) == debug_from:
             pipe.debug = True
 
-        if iteration >= 10000:
+        if iteration >= 5000:
             mlp = specular
             opt_opacity = False
-            if iteration == 10000:
+            if iteration == 5000:
                 gaussians.training_reset(opt)
+            mlp_warm_up = False
+        elif iteration < 5000 and iteration > 500:
+            mlp = specular
+            opt_opacity = True
+            mlp_warm_up = True
         else:
             mlp = None
             opt_opacity = True
-
+            mlp_warm_up = True
         
-        render_pkg = sdf_render(viewpoint_cam, gaussians, pipe, background, kernel_size=dataset.kernel_size, mlp=mlp)
+        render_pkg = sdf_render(viewpoint_cam, gaussians, pipe, background, kernel_size=dataset.kernel_size, 
+                                mlp=mlp, mlp_warm_up=mlp_warm_up)
         rendering, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
         
         image = rendering[:3, :, :]
@@ -173,17 +180,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         loss += depth_normal_weight * depth_normal_loss + distortion_weight * distortion_loss
         
         if not mlp == None:  
-            gaussian_opacity = render_pkg["gaussian_opacity"]
             if iteration % 100 == 0:
                 mlp_smooth_loss = specular.smoothness()
             else:
                 mlp_smooth_loss = torch.tensor(0).to(gt_image.device)
 
-            loss += opt.mlp_smooth_weight * mlp_smooth_loss + get_loss(render_pkg, opt)
+            loss += opt.lambda_mlp_smooth * mlp_smooth_loss + get_loss(render_pkg, opt, mlp_warm_up)
 
-            sdf_gradient = render_pkg["gaussian_normal"]
+            sdf_gradient = render_pkg["sdf_gradient"]
+            gaussian_sdf = render_pkg["gaussian_sdf"]
+
+            # print(f"min gaussian {gaussian_opacity.min()}, max gaussian {gaussian_opacity.max()}")
         
-        sdf_gradient = torch.norm(sdf_gradient, dim=-1) if not mlp == None else None
+        sdf_gradient_value = None #orch.norm(sdf_gradient, dim=-1) if not mlp == None else None
         loss.backward()
         
         iter_end.record()
@@ -193,13 +202,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             with torch.no_grad():
                 eval_cam = allCameras[random.randint(0, len(allCameras) -1)]
                 
-                rendering = sdf_render(eval_cam, gaussians, pipe, background, kernel_size=dataset.kernel_size, mlp=mlp)["render"]
+                render_pkg = sdf_render(eval_cam, gaussians, pipe, background, kernel_size=dataset.kernel_size, 
+                                        mlp=mlp, full_image=True, mlp_warm_up=mlp_warm_up)
+                rendering = render_pkg["render"]
                 image = rendering[:3, :, :]
-                transformed_image = image
+                # transformed_image = image
 
                 normal = rendering[3:6, :, :]
                 normal = torch.nn.functional.normalize(normal, p=2, dim=0)
-                
+
+                volume_depth_map = render_pkg["volume_depth_map"]
+
+            volume_depth_map = apply_depth_colormap(volume_depth_map[..., None], None, near_plane=0.2, far_plane=6)
+            volume_depth_map = volume_depth_map.permute(2, 0, 1)
+    
             # transform to world space
             c2w = (eval_cam.world_view_transform.T).inverse()
             normal2 = c2w[:3, :3] @ normal.reshape(3, -1)
@@ -213,7 +229,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             
             gt_image = eval_cam.original_image.cuda()
             
-            depth_map = apply_depth_colormap(depth[..., None], rendering[7, :, :, None], near_plane=None, far_plane=None)
+            depth_map = apply_depth_colormap(depth[..., None], None, near_plane=0.2, far_plane=6)
             depth_map = depth_map.permute(2, 0, 1)
             
             accumlated_alpha = rendering[7, :, :, None]
@@ -224,7 +240,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             distortion_map = colormap(distortion_map.detach().cpu().numpy()).to(normal.device)
         
             row0 = torch.cat([gt_image, image, depth_normal, normal], dim=2)
-            row1 = torch.cat([depth_map, colored_accum_alpha, distortion_map, transformed_image], dim=2)
+            row1 = torch.cat([depth_map, colored_accum_alpha, distortion_map, volume_depth_map], dim=2)
             
             image_to_show = torch.cat([row0, row1], dim=1)
             image_to_show = torch.clamp(image_to_show, 0, 1)
@@ -255,16 +271,23 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.05, scene.cameras_extent, size_threshold, sdf_gradient=sdf_gradient, opt_opacity=opt_opacity)
-                    gaussians.compute_3D_filter(cameras=trainCameras)
+                    sdf_th = max((0.2 - np.exp(iteration/3000)/2.7), 0.1)
+                    if mlp_warm_up == False:
+                        sdf_value = gaussian_sdf
+                    else:
+                        sdf_value = None
+                    sdf_value = None
 
-                if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.05, scene.cameras_extent, size_threshold, sdf_th=sdf_th, sdf_value=sdf_value, sdf_gradient=sdf_gradient_value, opt_opacity=opt_opacity)
+                    # gaussians.compute_3D_filter(cameras=trainCameras)
+
+                if mlp == None and (iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter)):
                     gaussians.reset_opacity()
 
-            if iteration % 100 == 0 and iteration > opt.densify_until_iter:
-                if iteration < opt.iterations - 100:
-                    # don't update in the end of training
-                    gaussians.compute_3D_filter(cameras=trainCameras)
+            # if iteration % 100 == 0 and iteration > opt.densify_until_iter:
+            #     if iteration < opt.iterations - 100:
+            #         # don't update in the end of training
+            #         gaussians.compute_3D_filter(cameras=trainCameras)
         
             # Optimizer step
             gaussians.optimizer.step()
@@ -274,8 +297,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             specular.update_learning_rate(iteration)
             specular.optimizer.zero_grad()
 
-            if not mlp == None:
-                gaussians.set_opacity(gaussian_opacity)
+            if not mlp == None and iteration % 500 == 0:
+                with torch.no_grad():
+                    print(f"Num of gaussians: {gaussians.get_xyz.shape[0]}")
+                    # print(f"Min threshold: {sdf_gradient_value.min().item()}, Max threshold: {sdf_gradient_value.max().item()}")
 
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
@@ -363,7 +388,7 @@ if __name__ == "__main__":
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
-    args.source_path = '/mnt/user/datasets/data/NeRF/lego'
+    args.source_path = '/home/kunyi/work/data/NeRF/lego'
     args.model_path = 'outputs/blender/lego'
     args.eval = True
     

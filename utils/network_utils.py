@@ -14,11 +14,11 @@ class Dir_Encoding(torch.nn.Module):
 
     """
 
-    def __init__(self, input_c, output_c, scale=25):
+    def __init__(self, in_dim, out_dim, scale=25):
         super().__init__()
 
         self._B = nn.Parameter(torch.randn(
-            (input_c, output_c)) * scale)
+            (in_dim, out_dim)) * scale)
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
@@ -124,11 +124,15 @@ def get_encoder(encoding, input_dim=3,
 
       
 class Pos_Encoding(nn.Module):
-    def __init__(self, cfg, bound):
+    def __init__(self, cfg, bound, use_pe=False):
         super().__init__()
+        self.use_pe = use_pe
+        if self.use_pe:
         # Coordinate encoding
-        self.pe_fn, self.pe_dim = get_encoder(cfg['pos']['method'], 
-                                              n_bins=cfg['pos']['n_bins'])
+            self.pe_fn, self.pe_dim = get_encoder(cfg['pos']['method'], 
+                                                n_bins=cfg['pos']['n_bins'])
+        else:
+            self.pe_fn, self.pe_dim = None, 0
 
         # Sparse parametric grid encoding
         dim_max = (bound[:,1] - bound[:,0]).max()
@@ -139,7 +143,11 @@ class Pos_Encoding(nn.Module):
         print('Grid size:', self.grid_dim)
     
     def forward(self, pts):
-        pe = self.pe_fn(pts)
+        if self.use_pe:
+            pe = self.pe_fn(pts)
+        else:
+            pe = None
+
         grid = self.grid_fn(pts)
         return pe, grid
     
@@ -147,18 +155,21 @@ class Pos_Encoding(nn.Module):
 class SDF(nn.Module):
     def __init__(self, pts_dim, hidden_dim=32, feature_dim=32):
         super().__init__()
-
-        self.decoder = tcnn.Network(n_input_dims=pts_dim+feature_dim,
+        in_dim = pts_dim + feature_dim
+        self.decoder = tcnn.Network(n_input_dims=in_dim,
                                     n_output_dims=1,
                                     network_config={
-                                        "otype": "FullyFusedMLP",
+                                        "otype": "CutlassMLP", # use CutlassMLP if not support FullyFusedMLP
                                         "activation": "ReLU",
                                         "output_activation": "None",
                                         "n_neurons": hidden_dim,
                                         "n_hidden_layers": 1})
         
     def forward(self, x, f):
-        return self.decoder(torch.cat((x, f), -1))
+        if not x == None:
+            f = torch.cat((x, f), -1)
+
+        return self.decoder(f)
     
 
 class SH(nn.Module):
@@ -168,16 +179,20 @@ class SH(nn.Module):
         self.decoder = tcnn.Network(n_input_dims=in_dim,
                                           n_output_dims=out_dim,
                                           network_config={
-                                            "otype": "FullyFusedMLP",
+                                            "otype": "CutlassMLP", # use CutlassMLP if not support FullyFusedMLP
                                             "activation": "ReLU",
                                             "output_activation": "None",
                                             "n_neurons": hidden_dim,
                                             "n_hidden_layers": 1})       
         
     def forward(self, x, d, f):
-        out = self.decoder(torch.cat((x, d, f), -1))
+        if not x == None:
+            f = torch.cat((x, f), -1)
+        else:
+            f = torch.cat((d, f), -1)
+        out = self.decoder(f)
         square_sum = torch.sum(out**2, dim=-1)
-        out = out / torch.sqrt(square_sum)
+        out = out / torch.sqrt(square_sum)[:, None]
         return out
 
 
@@ -218,7 +233,7 @@ class BellDensity(Density):  # alpha * Laplace(loc=0, scale=beta).cdf(-sdf)
         if beta is None:
             beta = self.get_beta()
 
-        return beta * torch.exp(-beta * sdf) / (1 + torch.exp(-beta * sdf)) ** 2
+        return torch.exp(-beta * sdf) / (1 + torch.exp(-beta * sdf)) ** 2
 
     def get_beta(self):
         beta = self.beta + self.beta_min
