@@ -217,7 +217,7 @@ class LaplaceDensity(Density):  # alpha * Laplace(loc=0, scale=beta).cdf(-sdf)
             beta = self.get_beta()
 
         alpha = 1 / beta
-        return alpha * (0.5 + 0.5 * sdf.sign() * torch.expm1(-sdf.abs() / beta))
+        return F.sigmoid(alpha * (0.5 + 0.5 * sdf.sign() * torch.expm1(-sdf.abs() / beta)))
 
     def get_beta(self):
         beta = self.beta.abs() + self.beta_min
@@ -255,3 +255,11 @@ class SimpleDensity(Density):  # like NeRF
             noise = torch.randn(sdf.shape).cuda() * self.noise_std
             sdf = sdf + noise
         return torch.relu(sdf)
+
+class ScaleNetwork(nn.Module):
+    def __init__(self, init_val):
+        super(ScaleNetwork, self).__init__()
+        self.register_parameter('variance', nn.Parameter(torch.tensor(init_val)))
+
+    def forward(self, x):
+        return torch.relu(self.variance) * x

@@ -89,17 +89,17 @@ class OptimizationParams(ParamGroup):
         self.opacity_lr = 0.05
         self.scaling_lr = 0.005
         self.rotation_lr = 0.001
-        self.network_feature_lr = 0.05
+        self.network_feature_lr = 0.001
         self.appearance_embeddings_lr = 0.001
         self.appearance_network_lr = 0.001
         self.densify_grad_threshold = 0.0002
-        self.densify_sdf_grad_threshold = 0.001
+        self.densify_sdf_grad_threshold = 0.00
         self.percent_dense = 0.01
         
         self.distortion_from_iter = 15000
         self.depth_normal_from_iter = 15000
         self.densification_interval = 100
-        self.opacity_reset_interval = 3000
+        self.opacity_reset_interval = 1200
         self.densify_from_iter = 500
         self.densify_until_iter = 15_000
     
@@ -107,15 +107,15 @@ class OptimizationParams(ParamGroup):
         self.lambda_distortion = 100
         self.lambda_depth_normal = 0.05
         self.lambda_fs = 10.0
-        self.lambda_vloume_sdf = 100.
-        self.lambda_volume_depth = 100.0
-        self.lambda_gaussian_normal = 0.1
+        self.lambda_vloume_sdf = 0.5
+        self.lambda_volume_depth = 0.5
+        self.lambda_gaussian_normal = 0.05
         self.lambda_eik_loss = 0.001
-        self.lambda_sdf = 10.0
-        self.lambda_depth_smooth = 0.0
+        self.lambda_sdf = 1.0
+        self.lambda_depth_smooth = 1.0
         self.lambda_scale = 0.00
         self.lambda_mlp_smooth = 0.001
-        self.lambda_opacity = 100.
+        self.lambda_opacity = 10.
 
         self.network = {}
         self.network['hidden_dim'] = 32

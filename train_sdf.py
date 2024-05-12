@@ -131,7 +131,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if iteration == 1000:
                 gaussians.training_reset(opt)
             mlp_warm_up = False
-        elif iteration < 1000 and iteration > 500:
+        elif iteration < 1000 and iteration > 300:
             mlp = specular
             opt_opacity = True
             mlp_warm_up = True
@@ -192,7 +192,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             # print(f"min gaussian {gaussian_opacity.min()}, max gaussian {gaussian_opacity.max()}")
         
-        sdf_gradient_value = None #orch.norm(sdf_gradient, dim=-1) if not mlp == None else None
         loss.backward()
         
         iter_end.record()
@@ -212,9 +211,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 normal = torch.nn.functional.normalize(normal, p=2, dim=0)
 
                 volume_depth_map = render_pkg["volume_depth_map"]
-
-            volume_depth_map = apply_depth_colormap(volume_depth_map[..., None], None, near_plane=0.2, far_plane=6)
-            volume_depth_map = volume_depth_map.permute(2, 0, 1)
     
             # transform to world space
             c2w = (eval_cam.world_view_transform.T).inverse()
@@ -228,9 +224,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             depth_normal = depth_normal.permute(2, 0, 1)
             
             gt_image = eval_cam.original_image.cuda()
-            
+
+            depth_diff = (depth - volume_depth_map).abs()
+            depth_diff = apply_depth_colormap(depth_diff[..., None], None, near_plane=0.2, far_plane=6)
+            depth_diff = depth_diff.permute(2, 0, 1)
+
             depth_map = apply_depth_colormap(depth[..., None], None, near_plane=0.2, far_plane=6)
             depth_map = depth_map.permute(2, 0, 1)
+
+            volume_depth_map = apply_depth_colormap(volume_depth_map[..., None], None, near_plane=0.2, far_plane=6)
+            volume_depth_map = volume_depth_map.permute(2, 0, 1)
             
             accumlated_alpha = rendering[7, :, :, None]
             colored_accum_alpha = apply_depth_colormap(accumlated_alpha, None, near_plane=0.0, far_plane=1.0)
@@ -240,7 +243,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             distortion_map = colormap(distortion_map.detach().cpu().numpy()).to(normal.device)
         
             row0 = torch.cat([gt_image, image, depth_normal, normal], dim=2)
-            row1 = torch.cat([depth_map, colored_accum_alpha, distortion_map, volume_depth_map], dim=2)
+            row1 = torch.cat([colored_accum_alpha, depth_map, volume_depth_map, depth_diff], dim=2)
             
             image_to_show = torch.cat([row0, row1], dim=1)
             image_to_show = torch.clamp(image_to_show, 0, 1)
@@ -271,14 +274,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    sdf_th = max((0.2 - np.exp(iteration/3000)/2.7), 0.1)
+                    sdf_th = max((0.2 - (iteration/20000)), 0.1)
                     if mlp_warm_up == False and not mlp == None:
-                        sdf_value = gaussian_sdf
+                        sdf_gradient_value = torch.norm(sdf_gradient, dim=-1)
+                        sdf_value = gaussian_sdf.squeeze(-1)
                     else:
+                        sdf_gradient_value = None
                         sdf_value = None
+                    
+                    # sdf_gradient_value = None
                     # sdf_value = None
 
-                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.05, scene.cameras_extent, size_threshold, sdf_th=sdf_th, sdf_value=sdf_value, sdf_gradient=sdf_gradient_value, opt_opacity=opt_opacity)
+                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.1, scene.cameras_extent, size_threshold, sdf_th=sdf_th, sdf_value=sdf_value, sdf_gradient=sdf_gradient_value, opt_opacity=opt_opacity)
                     # gaussians.compute_3D_filter(cameras=trainCameras)
 
                 if mlp == None and (iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter)):
@@ -300,7 +307,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if not mlp == None and iteration % 500 == 0:
                 with torch.no_grad():
                     print(f"Num of gaussians: {gaussians.get_xyz.shape[0]}")
-                    # print(f"Min threshold: {sdf_gradient_value.min().item()}, Max threshold: {sdf_gradient_value.max().item()}")
+                    mlp.extract_mesh(mesh_savepath=f"{dataset.model_path}/sdf_mesh_{iteration}.ply")
 
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))

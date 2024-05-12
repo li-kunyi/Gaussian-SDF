@@ -294,6 +294,8 @@ def select_uv(i, j, n, color, device='cuda:0'):
 
     """
     channel = color.shape[-1]
+    depth = color[..., -1]
+    non_zero_idx = (depth.reshape(-1) > 0).nonzero()
     i = i.reshape(-1)
     j = j.reshape(-1)
     indices = torch.randint(i.shape[0], (n,), device=device)
@@ -394,3 +396,29 @@ def sample_along_rays(gt_depth, n_samples, n_surface, device):
         z_vals, _ = torch.sort(z_vals_near_surface, -1)
 
     return z_vals.float()
+
+def getVoxels(x_max, x_min, y_max, y_min, z_max, z_min, voxel_size=None, resolution=None):
+
+    if not isinstance(x_max, float):
+        x_max = float(x_max)
+        x_min = float(x_min)
+        y_max = float(y_max)
+        y_min = float(y_min)
+        z_max = float(z_max)
+        z_min = float(z_min)
+    
+    if voxel_size is not None:
+        Nx = round((x_max - x_min) / voxel_size + 0.0005)
+        Ny = round((y_max - y_min) / voxel_size + 0.0005)
+        Nz = round((z_max - z_min) / voxel_size + 0.0005)
+
+        tx = torch.linspace(x_min, x_max, Nx + 1)
+        ty = torch.linspace(y_min, y_max, Ny + 1)
+        tz = torch.linspace(z_min, z_max, Nz + 1)
+    else:
+        tx = torch.linspace(x_min, x_max, resolution)
+        ty = torch.linspace(y_min, y_max,resolution)
+        tz = torch.linspace(z_min, z_max, resolution)
+
+
+    return tx, ty, tz

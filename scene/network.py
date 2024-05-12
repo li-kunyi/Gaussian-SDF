@@ -1,11 +1,13 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from utils.network_utils import SDF, LaplaceDensity, BellDensity, Pos_Encoding, Dir_Encoding, SH
+from utils.network_utils import SDF, LaplaceDensity, BellDensity, Pos_Encoding, Dir_Encoding, SH, ScaleNetwork
 import os
 import numpy as np
+import marching_cubes as mcubes
+import trimesh
 from utils.system_utils import searchForMaxIteration
-from utils.general_utils import get_expon_lr_func, get_linear_noise_func, coordinates
+from utils.general_utils import get_expon_lr_func, get_linear_noise_func, coordinates, getVoxels
 
 class Model(nn.Module):
     def __init__(self, cfg, bounding_box, sh_out_dim):
@@ -16,7 +18,9 @@ class Model(nn.Module):
 
         self.query_sdf = SDF(pts_dim=self.pe_dim, hidden_dim=cfg['hidden_dim'], feature_dim=self.grid_dim)
 
-        self.sdf2opacity = BellDensity(**cfg['density'])
+        self.sdf2opacity = LaplaceDensity(**cfg['density'])
+
+        self.gaussian_scaler = LaplaceDensity(**cfg['density'])#ScaleNetwork(1.0)
 
         self.dir_embed = Dir_Encoding(3, 32)
         self.query_sh = SH(32 + self.pe_dim + self.grid_dim, sh_out_dim * 3)
@@ -157,3 +161,53 @@ class SpecModel:
                 return lr
 
 
+    def extract_mesh(self, voxel_size=None, isolevel=0.0, mesh_savepath=''):
+        '''
+        Extracts mesh from the scene model using marching cubes (Adapted from NeuralRGBD)
+        '''
+        # Query network on dense 3d grid of points
+        config = self.cfg
+        marching_cube_bound = self.bounding_box
+
+        x_min, y_min, z_min = marching_cube_bound[:, 0]
+        x_max, y_max, z_max = marching_cube_bound[:, 1]
+
+        tx, ty, tz = getVoxels(x_max, x_min, y_max, y_min, z_max, z_min, voxel_size=config['grid']['voxel_size'])
+        query_pts = torch.stack(torch.meshgrid(tx, ty, tz, indexing='ij'), -1).to(torch.float32)
+
+        sh = query_pts.shape
+        flat = query_pts.reshape([-1, 3]).cuda()
+        raw = []
+        for i in range(flat.shape[0] // 4096 + 1):
+            start = i * 4096
+            end = min(flat.shape[0], (i + 1) * 4096)
+            if end - start > 0:
+                sdf = self.query_sdf(flat[start:end])
+                raw.append(sdf.cpu().numpy())
+        
+        raw = np.concatenate(raw, 0).astype(np.float32)
+        raw = np.reshape(raw, list(sh[:-1]) + [-1])
+
+        print('Running Marching Cubes')
+        vertices, triangles = mcubes.marching_cubes(raw.squeeze(), isolevel, truncation=3.0)
+        print('done', vertices.shape, triangles.shape)
+
+        # normalize vertex positions
+        vertices[:, :3] /= np.array([[tx.shape[0] - 1, ty.shape[0] - 1, tz.shape[0] - 1]])
+
+        # Rescale and translate
+        tx = tx.cpu().data.numpy()
+        ty = ty.cpu().data.numpy()
+        tz = tz.cpu().data.numpy()
+        
+        scale = np.array([tx[-1] - tx[0], ty[-1] - ty[0], tz[-1] - tz[0]])
+        offset = np.array([tx[0], ty[0], tz[0]])
+        vertices[:, :3] = scale[np.newaxis, :] * vertices[:, :3] + offset
+
+        mesh = trimesh.Trimesh(vertices, triangles, process=False)
+
+        mesh.export(mesh_savepath)
+
+        print('Mesh saved')
+        # return mesh
+    #### #### 

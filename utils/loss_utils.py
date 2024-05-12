@@ -131,7 +131,22 @@ def compute_loss(prediction, target, loss_type='l2'):
 
     raise Exception('Unsupported loss type')
     
+def normal_laplacian_loss(predicted_normals):
+    predicted_normals = predicted_normals.unsqueeze(0)
+    # Define Laplacian operator
+    laplacian_operator = torch.tensor([[0, 1, 0],
+                                       [1, -4, 1],
+                                       [0, 1, 0]], dtype=torch.float32, device=predicted_normals.device)
+    laplacian_operator = laplacian_operator.view(1, 1, 3, 3)  # Reshape for convolution
 
+    # Apply Laplacian operator
+    laplacian_normals = F.conv2d(predicted_normals, laplacian_operator.repeat(1,3,1,1), padding=1)
+
+    # Compute L1 or L2 loss between original normals and Laplacian-processed normals
+    # For example, using L2 loss
+    loss = torch.mean(torch.pow(predicted_normals - laplacian_normals, 2))
+
+    return loss
 
 def get_loss(render_pkg, opt, mlp_warm_up):
     '''
@@ -147,7 +162,7 @@ def get_loss(render_pkg, opt, mlp_warm_up):
     '''
 
     min_scales = render_pkg["min_scales"]
-    depth_map = render_pkg["depth_map"]
+    depth_map, render_normal_map = render_pkg["depth_map"], render_pkg["render_normal_map"]
     gaussian_sdf, disk_sdf = render_pkg["gaussian_sdf"], render_pkg["disk_sdf"]
     gaussian_normal, sdf_gradient, dirs = render_pkg["gaussian_normal"], render_pkg["sdf_gradient"], render_pkg["dir_pp_normalized"]
     gaussian_sdf2normal = sdf_gradient / torch.norm(sdf_gradient, dim=-1)[:, None]
@@ -159,10 +174,10 @@ def get_loss(render_pkg, opt, mlp_warm_up):
     # eikonal loss
     eikonal_loss = ((sdf_gradient.norm(2, dim=-1) - 1) ** 2).sum()
     # gaussian sdf loss
-    sdf_loss = torch.abs(gaussian_sdf).mean() + torch.abs(disk_sdf).mean()
+    sdf_loss = torch.abs(gaussian_sdf).mean() + torch.abs(disk_sdf).mean() + 10*(disk_sdf).var()
 
     # depth smooth loss
-    depth_smooth_loss = tv_loss(depth_map)
+    depth_smooth_loss = tv_loss(depth_map) + tv_loss(render_normal_map.permute(1,2,0))
 
     # minimum scale loss
     min_scale_loss = torch.relu(min_scales).mean()
@@ -176,7 +191,7 @@ def get_loss(render_pkg, opt, mlp_warm_up):
             opt.lambda_eik_loss * eikonal_loss + opt.lambda_sdf * sdf_loss +\
             opt.lambda_depth_smooth * depth_smooth_loss + opt.lambda_scale * min_scale_loss + opt.lambda_opacity * opacity_loss
     else:      
-        loss = opt.lambda_fs * volume_fs_loss + opt.lambda_vloume_sdf * volume_sdf_loss + opt.lambda_volume_depth * volume_depth_loss +\
+        loss = 0.1*opt.lambda_fs * volume_fs_loss + 0.1*opt.lambda_vloume_sdf * volume_sdf_loss + 0.1*opt.lambda_volume_depth * volume_depth_loss +\
             opt.lambda_gaussian_normal * normal_loss + opt.lambda_eik_loss * eikonal_loss + opt.lambda_sdf * sdf_loss +\
             opt.lambda_depth_smooth * depth_smooth_loss + opt.lambda_scale * min_scale_loss
 

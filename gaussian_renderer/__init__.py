@@ -178,7 +178,7 @@ def get_values(mlp, dir_pp, reflect_normals, rays_o, min_scales, num_process=100
     rays_o = rays_o.repeat(batch_size, 1)
     pts = rays_o + rays_d * z_vals[:, None]  # n_rays, n_samples, 3
         
-    opacity = []
+    density = []
     sdf = []
     sdf_gradient = []
     sh = []
@@ -186,28 +186,19 @@ def get_values(mlp, dir_pp, reflect_normals, rays_o, min_scales, num_process=100
         start = i * num_process
         end = min(batch_size, (i + 1) * num_process)
         if end - start > 0:
-            _alpha, _sdf, _gradient, _sh = mlp.query_sdf_gradient_sh(pts[start:end], reflect_normals[start:end])
-            opacity.append(_alpha)
+            _density, _sdf, _gradient, _sh = mlp.query_sdf_gradient_sh(pts[start:end], reflect_normals[start:end])
+            _density = mlp.specular.gaussian_scaler(_sdf)
+            density.append(_density)
             sdf.append(_sdf)
             sdf_gradient.append(_gradient)
             sh.append(_sh)
 
-    opacity = torch.cat(opacity, dim=0).to(device)
+    density = torch.cat(density, dim=0).to(device)
     sdf = torch.cat(sdf, dim=0).to(device)
     sdf_gradient = torch.cat(sdf_gradient, dim=0).to(device)
     sh = torch.cat(sh, dim=0).to(device)
 
-    # # Estimate opacity from sdf
-    # estimated_next_sdf = sdf.squeeze(-1) - min_scales * 0.5
-    # estimated_prev_sdf = sdf.squeeze(-1) + min_scales * 0.5
-    # prev_cdf = torch.sigmoid(estimated_prev_sdf)
-    # next_cdf = torch.sigmoid(estimated_next_sdf)
-    # p = prev_cdf - next_cdf
-    # c = prev_cdf
-    # opacity = ((p + 1e-5) / (c + 1e-5)).clip(0.0, 1.0)
-    # opacity = opacity.unsqueeze(-1)
-
-    return opacity, sdf, sdf_gradient, sh
+    return density, sdf, sdf_gradient, sh
 
 
 def get_sdf_disk(mlp, pts, num_process=10000, device='cuda'):        
@@ -224,7 +215,7 @@ def get_sdf_disk(mlp, pts, num_process=10000, device='cuda'):
     return sdf
 
 
-def volume_rendering(mlp, camera, depth, n_sample=0, n_sample_surface=11, num_process=2048, truncation=0.1, full_image=False, device='cuda'):  
+def volume_rendering(mlp, camera, depth, n_sample=0, n_sample_surface=11, num_process=2048, truncation=0.1, full_image=False, mlp_warm_up=True, device='cuda'):  
     H, W = depth.shape
     fx = W / (2 * math.tan(camera.FoVx  / 2))
     fy = H / (2 * math.tan(camera.FoVy  / 2))
@@ -251,33 +242,27 @@ def volume_rendering(mlp, camera, depth, n_sample=0, n_sample_surface=11, num_pr
     
     batch_size, n_sample, c = pts.shape
     sdf = []
-    opacity = []
+    density = []
     for i in range(batch_size // num_process + 1):
         start = i * num_process
         end = min(batch_size, (i + 1) * num_process)
         if end - start > 0:
-            _opacity, _sdf = mlp.query_alpha_sdf(pts[start:end].reshape(-1, c))
-            opacity.append(_opacity.reshape(-1, n_sample))
-            sdf.append(_sdf.reshape(-1, 1))
-    opacity = torch.cat(opacity, dim=0).to(device)        
+            _density, _sdf = mlp.query_alpha_sdf(pts[start:end].reshape(-1, c))
+            density.append(_density.reshape(-1, n_sample))
+            sdf.append(_sdf.reshape(-1, n_sample))
+    density = torch.cat(density, dim=0).to(device)        
     sdf = torch.cat(sdf, dim=0).to(device)
-
-    # estimated_next_sdf = sdf - _dists.reshape(-1, 1) * 0.5
-    # estimated_prev_sdf = sdf + _dists.reshape(-1, 1) * 0.5
-    # prev_cdf = torch.sigmoid(estimated_prev_sdf)
-    # next_cdf = torch.sigmoid(estimated_next_sdf)
-    # p = prev_cdf - next_cdf
-    # c = prev_cdf
-
-    # opacity = ((p + 1e-5) / (c + 1e-5)).reshape(batch_size, n_sample).clip(0.0, 1.0)
-    sdf = sdf.reshape(batch_size, n_sample)
 
     dists = z_vals[:, 1:] - z_vals[:, :-1]
     dists = torch.cat([dists, torch.tensor([1e10]).cuda().unsqueeze(0).repeat(dists.shape[0], 1)], -1)
     dists = dists * torch.norm(rays_d[..., None, :], dim=-1)
 
-    weights = opacity.float() * torch.cumprod(torch.cat([torch.ones((opacity.shape[0], 1)).to(z_vals.device).float(), 
-                                                       (1.-opacity + 1e-10).float()], -1).float(), -1)[..., :-1]
+    free_energy = dists * density
+    shifted_free_energy = torch.cat([torch.zeros(dists.shape[0], 1).cuda(), free_energy[:, :-1]], dim=-1)  # shift one step
+    alpha = 1 - torch.exp(-free_energy)  # probability of it is not empty here
+    transmittance = torch.exp(-torch.cumsum(shifted_free_energy, dim=-1))  # probability of everything is empty up to now
+    weights = alpha * transmittance # probability of the ray hits something her
+    
     # rgb_map = torch.sum(weights[..., None] * rgb, -2)  # (N_rays, 3)
     volume_depth = torch.sum(weights * z_vals, -1)  # (N_rays)
 
@@ -291,9 +276,10 @@ def volume_rendering(mlp, camera, depth, n_sample=0, n_sample_surface=11, num_pr
 
     volume_fs_loss = F.l1_loss(sdf * front_mask, torch.ones_like(sdf) * front_mask)
     volume_sdf_loss = F.l1_loss((z_vals + sdf) * sdf_mask, depth_sp * sdf_mask)
-    volume_depth_loss = F.l1_loss(volume_depth, depth_sp.squeeze(1))
+    volume_depth_loss = F.l1_loss(volume_depth[:, None] * depth_mask, depth_sp * depth_mask)
 
-    return volume_fs_loss, volume_sdf_loss, volume_depth_loss, volume_depth
+
+    return volume_fs_loss, volume_sdf_loss, volume_depth_loss, volume_depth * depth_mask[:, 0]
 
 
 def sdf_render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, kernel_size: float,
@@ -394,7 +380,7 @@ def sdf_render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tens
             disk_sdf = get_sdf_disk(mlp, disk_points)
 
             pc.set_opacity(opacity)
-            hybrid = True
+            hybrid = False
 
     # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
     # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
@@ -432,8 +418,12 @@ def sdf_render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tens
         render_normal_map = rendering[3:6, :, :]
         render_normal_map = torch.nn.functional.normalize(render_normal_map, p=2, dim=0)
 
-        volume_fs_loss, volume_sdf_loss, volume_depth_loss, volume_depth = volume_rendering(mlp, viewpoint_camera, depth_map.clone().detach(),
-                                                                                            full_image=full_image)
+        if mlp_warm_up:
+            volume_fs_loss, volume_sdf_loss, volume_depth_loss, volume_depth = volume_rendering(mlp, viewpoint_camera, depth_map.detach(),
+                                                                                                full_image=full_image)
+        else:
+            volume_fs_loss, volume_sdf_loss, volume_depth_loss, volume_depth = volume_rendering(mlp, viewpoint_camera, depth_map,
+                                                                                                full_image=full_image, mlp_warm_up=mlp_warm_up)
         if full_image:
             volume_depth_map = volume_depth.reshape(depth_map.shape)
 
