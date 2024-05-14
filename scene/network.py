@@ -189,7 +189,7 @@ class SpecModel:
         raw = np.reshape(raw, list(sh[:-1]) + [-1])
 
         print('Running Marching Cubes')
-        vertices, triangles = mcubes.marching_cubes(raw.squeeze(), isolevel, truncation=3.0)
+        vertices, triangles = mcubes.marching_cubes(raw.squeeze(), isolevel, truncation=0.1)
         print('done', vertices.shape, triangles.shape)
 
         # normalize vertex positions

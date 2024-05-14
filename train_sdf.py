@@ -125,13 +125,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if (iteration - 1) == debug_from:
             pipe.debug = True
 
-        if iteration >= 1000:
+        if iteration >= 5000:
             mlp = specular
             opt_opacity = False
-            if iteration == 1000:
+            if iteration == 5000:
                 gaussians.training_reset(opt)
             mlp_warm_up = False
-        elif iteration < 1000 and iteration > 300:
+        elif iteration < 5000 and iteration > 500:
             mlp = specular
             opt_opacity = True
             mlp_warm_up = True
@@ -211,6 +211,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 normal = torch.nn.functional.normalize(normal, p=2, dim=0)
 
                 volume_depth_map = render_pkg["volume_depth_map"]
+                gaussian_density_map = render_pkg["gaussian_density_map"]
     
             # transform to world space
             c2w = (eval_cam.world_view_transform.T).inverse()
@@ -238,12 +239,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             accumlated_alpha = rendering[7, :, :, None]
             colored_accum_alpha = apply_depth_colormap(accumlated_alpha, None, near_plane=0.0, far_plane=1.0)
             colored_accum_alpha = colored_accum_alpha.permute(2, 0, 1)
+
+            gaussian_density_map = apply_depth_colormap(gaussian_density_map[..., None], None, near_plane=0.0, far_plane=1.0)
+            gaussian_density_map = gaussian_density_map.permute(2, 0, 1)
             
             distortion_map = rendering[8, :, :]
             distortion_map = colormap(distortion_map.detach().cpu().numpy()).to(normal.device)
         
             row0 = torch.cat([gt_image, image, depth_normal, normal], dim=2)
-            row1 = torch.cat([colored_accum_alpha, depth_map, volume_depth_map, depth_diff], dim=2)
+            row1 = torch.cat([gaussian_density_map, depth_map, volume_depth_map, depth_diff], dim=2)
             
             image_to_show = torch.cat([row0, row1], dim=1)
             image_to_show = torch.clamp(image_to_show, 0, 1)
@@ -282,10 +286,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         sdf_gradient_value = None
                         sdf_value = None
                     
-                    # sdf_gradient_value = None
-                    # sdf_value = None
+                    sdf_gradient_value = None
+                    sdf_value = None
 
-                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.1, scene.cameras_extent, size_threshold, sdf_th=sdf_th, sdf_value=sdf_value, sdf_gradient=sdf_gradient_value, opt_opacity=opt_opacity)
+                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.05, scene.cameras_extent, size_threshold, sdf_th=sdf_th, sdf_value=sdf_value, sdf_gradient=sdf_gradient_value, opt_opacity=opt_opacity)
                     # gaussians.compute_3D_filter(cameras=trainCameras)
 
                 if mlp == None and (iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter)):
@@ -304,7 +308,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             specular.update_learning_rate(iteration)
             specular.optimizer.zero_grad()
 
-            if not mlp == None and iteration % 500 == 0:
+            if not mlp == None and iteration % 1000 == 0:
                 with torch.no_grad():
                     print(f"Num of gaussians: {gaussians.get_xyz.shape[0]}")
                     mlp.extract_mesh(mesh_savepath=f"{dataset.model_path}/sdf_mesh_{iteration}.ply")

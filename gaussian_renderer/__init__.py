@@ -12,7 +12,8 @@
 import torch
 import math
 from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
-from scene.sdf_gaussian_model import GaussianModel
+from scene.sdf_gaussian_model_v2 import GaussianModel
+# from scene.gaussian_model import GaussianModel
 import torch.nn.functional as F
 from utils.sh_utils import eval_sh
 from utils.general_utils import depth_to_normal, get_samples, sample_along_rays, get_all_rays
@@ -117,6 +118,119 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             "radii": radii}
 
 
+def sdf_render_v2(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, kernel_size: float, scaling_modifier = 1.0, override_color = None, subpixel_offset=None):
+    """
+    Render the scene. 
+    
+    Background tensor (bg_color) must be on GPU!
+    """
+ 
+    # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
+    screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
+    try:
+        screenspace_points.retain_grad()
+    except:
+        pass
+
+    # Set up rasterization configuration
+    tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
+    tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
+
+    if subpixel_offset is None:
+        subpixel_offset = torch.zeros((int(viewpoint_camera.image_height), int(viewpoint_camera.image_width), 2), dtype=torch.float32, device="cuda")
+        
+    raster_settings = GaussianRasterizationSettings(
+        image_height=int(viewpoint_camera.image_height),
+        image_width=int(viewpoint_camera.image_width),
+        tanfovx=tanfovx,
+        tanfovy=tanfovy,
+        kernel_size=kernel_size,
+        subpixel_offset=subpixel_offset,
+        bg=bg_color,
+        scale_modifier=scaling_modifier,
+        viewmatrix=viewpoint_camera.world_view_transform,
+        projmatrix=viewpoint_camera.full_proj_transform,
+        sh_degree=pc.active_sh_degree,
+        campos=viewpoint_camera.camera_center,
+        prefiltered=False,
+        debug=pipe.debug
+    )
+
+    rasterizer = GaussianRasterizer(raster_settings=raster_settings)
+
+    means3D = pc.get_xyz
+    means2D = screenspace_points
+    opacity = pc.get_opacity
+
+    sorted_axis, sorted_scale = pc.get_sorted_axis()
+    normal_axis = sorted_axis[:, 0, :]
+    normal = normal_axis / normal_axis.norm(dim=1, keepdim=True)  # (N, 3)
+    u_axis = sorted_axis[:, 1, :]
+    u_axis = u_axis / u_axis.norm(dim=1, keepdim=True)  # (N, 3)
+    v_axis = sorted_axis[:, 2, :]
+    v_axis = v_axis / v_axis.norm(dim=1, keepdim=True)  # (N, 3)
+    min_scales = sorted_scale[:, 0]
+    u_scales = sorted_scale[:, 1]
+    v_scales = sorted_scale[:, 2]
+
+    free_energy = min_scales[:, None] * opacity
+    opacity = 1 - torch.exp(-free_energy)  # probability of it is not empty here
+
+    # If precomputed 3d covariance is provided, use it. If not, then it will be computed from
+    # scaling / rotation by the rasterizer.
+    scales = None
+    rotations = None
+    cov3D_precomp = None
+    if pipe.compute_cov3D_python:
+        cov3D_precomp = pc.get_covariance(scaling_modifier)
+    else:
+        scales = pc.get_scaling
+        rotations = pc.get_rotation
+
+    view2gaussian_precomp = None
+    # pipe.compute_view2gaussian_python = True
+    if pipe.compute_view2gaussian_python:
+        view2gaussian_precomp = pc.get_view2gaussian(raster_settings.viewmatrix)
+
+    # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
+    # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
+    shs = None
+    colors_precomp = None
+    if override_color is None:
+        if pipe.convert_SHs_python:
+            shs_view = pc.get_features.transpose(1, 2).view(-1, 3, (pc.max_sh_degree+1)**2)
+            dir_pp = (pc.get_xyz - viewpoint_camera.camera_center.repeat(pc.get_features.shape[0], 1))
+            # # we local direction
+            # cam_pos_local = view2gaussian_precomp[:, 3, :3]
+            # cam_pos_local_scaled = cam_pos_local / scales
+            # dir_pp = -cam_pos_local_scaled
+            dir_pp_normalized = dir_pp/dir_pp.norm(dim=1, keepdim=True)
+            sh2rgb = eval_sh(pc.active_sh_degree, shs_view, dir_pp_normalized)
+            colors_precomp = torch.clamp_min(sh2rgb + 0.5, 0.0)
+        else:
+            shs = pc.get_features
+    else:
+        colors_precomp = override_color
+
+    # Rasterize visible Gaussians to image, obtain their radii (on screen). 
+    rendered_image, radii = rasterizer(
+        means3D = means3D,
+        means2D = means2D,
+        shs = shs,
+        colors_precomp = colors_precomp,
+        opacities = opacity,
+        scales = scales,
+        rotations = rotations,
+        cov3D_precomp = cov3D_precomp,
+        view2gaussian_precomp=view2gaussian_precomp)
+
+    # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
+    # They will be excluded from value updates used in the splitting criteria.
+    return {"render": rendered_image,
+            "viewspace_points": screenspace_points,
+            "visibility_filter" : radii > 0,
+            "radii": radii}
+
 
 def sample_ellipse_planes(normals, U, V, u_scale, v_scale, centers, num_samples=9):
     """
@@ -149,7 +263,7 @@ def sample_ellipse_planes(normals, U, V, u_scale, v_scale, centers, num_samples=
 
     return world_points # [n_gaussian, n_sample, 3]
 
-def project_to_image(viewpoint_camera, pts, device):
+def project_to_image(viewpoint_camera, pts, device="cuda"):
     # for each gaussian, project to image coordinate to match depth
     H, W = viewpoint_camera.image_height, viewpoint_camera.image_width
     K = torch.eye(3).to(device)
@@ -163,20 +277,14 @@ def project_to_image(viewpoint_camera, pts, device):
     transformed_pts = (rel_w2c @ pts4.T).T[:, :3]
     u, v, d = transformed_pts[:, 0], transformed_pts[:, 1], transformed_pts[:, 2]
     image_coordinates = (K @ (torch.stack([u / d, v / d, d / d], dim=1)).T).T[:, :2]
-    valid_indices = (image_coordinates[:, 0] >= 0) & (image_coordinates[:, 0] < W) & \
-                    (image_coordinates[:, 1] >= 0) & (image_coordinates[:, 1] < H) & (d > 0)
-    valid_coordinates = image_coordinates[valid_indices, :].float()
-
+    valid_indices = (image_coordinates[:, 0] > 0) & (image_coordinates[:, 0] < W-1) & \
+                    (image_coordinates[:, 1] > 0) & (image_coordinates[:, 1] < H-1) & (d > 0)
+    valid_coordinates = torch.round(image_coordinates[valid_indices, :]).long()
     return valid_indices, valid_coordinates
 
 
-def get_values(mlp, dir_pp, reflect_normals, rays_o, min_scales, num_process=10000, device='cuda'):    
-    batch_size = dir_pp.shape[0]
-
-    z_vals = dir_pp.norm(dim=1) + min_scales * 0.5
-    rays_d = dir_pp / dir_pp.norm(dim=1, keepdim=True)
-    rays_o = rays_o.repeat(batch_size, 1)
-    pts = rays_o + rays_d * z_vals[:, None]  # n_rays, n_samples, 3
+def get_values(mlp, pts, reflect_normals, scales, num_process=10000, device='cuda'):    
+    batch_size = pts.shape[0]
         
     density = []
     sdf = []
@@ -187,18 +295,19 @@ def get_values(mlp, dir_pp, reflect_normals, rays_o, min_scales, num_process=100
         end = min(batch_size, (i + 1) * num_process)
         if end - start > 0:
             _density, _sdf, _gradient, _sh = mlp.query_sdf_gradient_sh(pts[start:end], reflect_normals[start:end])
-            _density = mlp.specular.gaussian_scaler(_sdf)
             density.append(_density)
             sdf.append(_sdf)
             sdf_gradient.append(_gradient)
             sh.append(_sh)
 
     density = torch.cat(density, dim=0).to(device)
+    free_energy = scales[:, None] * density
+    alpha = 1 - torch.exp(-free_energy)  # probability of it is not empty here
     sdf = torch.cat(sdf, dim=0).to(device)
     sdf_gradient = torch.cat(sdf_gradient, dim=0).to(device)
     sh = torch.cat(sh, dim=0).to(device)
 
-    return density, sdf, sdf_gradient, sh
+    return alpha, sdf, sdf_gradient, sh
 
 
 def get_sdf_disk(mlp, pts, num_process=10000, device='cuda'):        
@@ -215,7 +324,7 @@ def get_sdf_disk(mlp, pts, num_process=10000, device='cuda'):
     return sdf
 
 
-def volume_rendering(mlp, camera, depth, n_sample=0, n_sample_surface=11, num_process=2048, truncation=0.1, full_image=False, mlp_warm_up=True, device='cuda'):  
+def volume_rendering(mlp, camera, depth, n_sample=10, n_sample_surface=11, num_process=4096, truncation=0.2, full_image=False, device='cuda'):  
     H, W = depth.shape
     fx = W / (2 * math.tan(camera.FoVx  / 2))
     fy = H / (2 * math.tan(camera.FoVy  / 2))
@@ -236,8 +345,6 @@ def volume_rendering(mlp, camera, depth, n_sample=0, n_sample_surface=11, num_pr
     z_vals = sample_along_rays(depth_sp, n_sample, n_sample_surface, device)  # [n_pixels, n_samples]
 
     dists = z_vals[..., 1:] - z_vals[..., :-1]
-    # _dists = torch.cat([dists, dists[:, -2:-1]], -1)
-    # mid_z_vals = z_vals + _dists * 0.5
     pts = rays_o[:, None, :] + rays_d[:, None, :] * z_vals[..., :, None]  # n_rays, n_samples, 3
     
     batch_size, n_sample, c = pts.shape
@@ -271,15 +378,69 @@ def volume_rendering(mlp, camera, depth, n_sample=0, n_sample_surface=11, num_pr
     back_mask = torch.where(z_vals > (depth_sp + truncation), torch.ones_like(z_vals), torch.zeros_like(z_vals))
     # valid mask
     depth_mask = torch.where(depth_sp > 0.0, torch.ones_like(depth_sp), torch.zeros_like(depth_sp))
-    # Valid sdf regionn
+    # Valid sdf region
     sdf_mask = (1.0 - front_mask) * (1.0 - back_mask) * depth_mask
 
-    volume_fs_loss = F.l1_loss(sdf * front_mask, torch.ones_like(sdf) * front_mask)
+    # volume_fs_loss = F.l1_loss(sdf * front_mask, torch.ones_like(sdf) * front_mask)
+    volume_fs_loss = torch.tensor(0).to(sdf.device)
     volume_sdf_loss = F.l1_loss((z_vals + sdf) * sdf_mask, depth_sp * sdf_mask)
-    volume_depth_loss = F.l1_loss(volume_depth[:, None] * depth_mask, depth_sp * depth_mask)
+    # volume_sdf_loss = torch.tensor(0).to(sdf.device) 
+    volume_depth_loss = F.l1_loss(volume_depth[:, None], depth_sp)
+    # volume_depth_loss = F.l1_loss(volume_depth[:, None] * depth_mask, depth_sp * depth_mask)
+
+    return volume_fs_loss, volume_sdf_loss, volume_depth_loss, volume_depth
 
 
-    return volume_fs_loss, volume_sdf_loss, volume_depth_loss, volume_depth * depth_mask[:, 0]
+def volume_rendering_full(mlp, camera, depth, n_sample=0, n_sample_surface=11, num_process=2048, truncation=0.1, full_image=False, mlp_warm_up=True, device='cuda'):  
+    H, W = depth.shape
+    fx = W / (2 * math.tan(camera.FoVx  / 2))
+    fy = H / (2 * math.tan(camera.FoVy  / 2))
+    w2c = camera.world_view_transform.T
+    c2w = torch.linalg.inv(w2c)
+    R = c2w[:3, :3]
+    T = c2w[:3, 3]
+
+    rays_o, rays_d = get_all_rays(H, W, fx, fy, (W-1)/2, (H-1)/2, R, T, device)
+    rays_o = rays_o.reshape(-1, 3)  # [N, 3]
+    rays_d = rays_d.reshape(-1, 3)
+    depth_sp = depth.reshape(-1, 1)
+
+    z_vals = sample_along_rays(depth_sp, n_sample, n_sample_surface, device)  # [n_pixels, n_samples]
+
+    dists = z_vals[..., 1:] - z_vals[..., :-1]
+    pts = rays_o[:, None, :] + rays_d[:, None, :] * z_vals[..., :, None]  # n_rays, n_samples, 3
+    
+    batch_size, n_sample, c = pts.shape
+    sdf = []
+    density = []
+    for i in range(batch_size // num_process + 1):
+        start = i * num_process
+        end = min(batch_size, (i + 1) * num_process)
+        if end - start > 0:
+            _density, _sdf = mlp.query_alpha_sdf(pts[start:end].reshape(-1, c))
+            density.append(_density.reshape(-1, n_sample))
+            sdf.append(_sdf.reshape(-1, n_sample))
+    density = torch.cat(density, dim=0).to(device)        
+    sdf = torch.cat(sdf, dim=0).to(device)
+
+    dists = z_vals[:, 1:] - z_vals[:, :-1]
+    dists = torch.cat([dists, torch.tensor([1e10]).cuda().unsqueeze(0).repeat(dists.shape[0], 1)], -1)
+    dists = dists * torch.norm(rays_d[..., None, :], dim=-1)
+
+    free_energy = dists * density
+    shifted_free_energy = torch.cat([torch.zeros(dists.shape[0], 1).cuda(), free_energy[:, :-1]], dim=-1)  # shift one step
+    alpha = 1 - torch.exp(-free_energy)  # probability of it is not empty here
+    transmittance = torch.exp(-torch.cumsum(shifted_free_energy, dim=-1))  # probability of everything is empty up to now
+    weights = alpha * transmittance # probability of the ray hits something her
+    
+    # rgb_map = torch.sum(weights[..., None] * rgb, -2)  # (N_rays, 3)
+    volume_depth = torch.sum(weights * z_vals, -1)  # (N_rays)
+    # valid mask
+    depth_mask = torch.where(depth_sp > 0.0, torch.ones_like(depth_sp), torch.zeros_like(depth_sp))
+
+
+    return volume_depth * depth_mask[:, 0]
+
 
 
 def sdf_render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, kernel_size: float,
@@ -371,13 +532,15 @@ def sdf_render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tens
         disk_points = sample_ellipse_planes(normal, u_axis, v_axis, u_scales, v_scales, means3D, num_samples=9)
         
         if mlp_warm_up:
-            mlp_opacity, gaussian_sdf, sdf_gradient, ref_shs_view = get_values(mlp, dir_pp.detach(), ref_dir.detach(), viewpoint_camera.camera_center.detach(), min_scales.detach())
+            mlp_opacity, gaussian_sdf, sdf_gradient, ref_shs_view = get_values(mlp, means3D.detach(), ref_dir.detach(), min_scales.detach())
             disk_sdf = get_sdf_disk(mlp, disk_points.detach())
+            disk_sdf = torch.cat((disk_sdf.squeeze(-1), gaussian_sdf), dim=-1)
             hybrid = False
         else:
-            mlp_opacity, gaussian_sdf, sdf_gradient, ref_shs_view = get_values(mlp, dir_pp, ref_dir, viewpoint_camera.camera_center.detach(), min_scales)
+            mlp_opacity, gaussian_sdf, sdf_gradient, ref_shs_view = get_values(mlp, means3D, ref_dir, min_scales)
             opacity = mlp_opacity
             disk_sdf = get_sdf_disk(mlp, disk_points)
+            disk_sdf = torch.cat((disk_sdf.squeeze(-1), gaussian_sdf), dim=-1)
 
             pc.set_opacity(opacity)
             hybrid = False
@@ -409,6 +572,7 @@ def sdf_render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tens
     
     depth_map = rendering[6, :, :]
     volume_depth_map = torch.zeros_like(depth_map).to(depth_map.device)
+    gaussian_density_map = torch.zeros_like(depth_map).to(depth_map.device)
     if not mlp == None:
         distortion_map = rendering[8, :, :]
         
@@ -423,9 +587,23 @@ def sdf_render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tens
                                                                                                 full_image=full_image)
         else:
             volume_fs_loss, volume_sdf_loss, volume_depth_loss, volume_depth = volume_rendering(mlp, viewpoint_camera, depth_map,
-                                                                                                full_image=full_image, mlp_warm_up=mlp_warm_up)
+                                                                                                full_image=full_image)
+        # volume_fs_loss = torch.tensor(0).to(means3D.device)
+        # volume_sdf_loss =  torch.tensor(0).to(means3D.device)
+        # volume_depth_loss =  torch.tensor(0).to(means3D.device)
+        # volume_depth = torch.tensor(0).to(means3D.device)
+        
         if full_image:
+            # volume_depth = volume_rendering_full(mlp, viewpoint_camera, depth_map, full_image=full_image, mlp_warm_up=mlp_warm_up)
             volume_depth_map = volume_depth.reshape(depth_map.shape)
+
+            valid_indices, valid_coordinates = project_to_image(viewpoint_camera, means3D)
+            valid_opacity = mlp_opacity[valid_indices]
+
+            for k in range(valid_coordinates.shape[0]):
+                i = valid_coordinates[:, 1]
+                j = valid_coordinates[:, 0]
+                gaussian_density_map[i, j] += valid_opacity[k]
 
         return {"render": rendering,
                 "viewspace_points": screenspace_points,
@@ -446,13 +624,15 @@ def sdf_render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tens
                 "volume_depth_map": volume_depth_map,
                 "dir_pp_normalized": dir_pp_normalized,
                 "gaussian_opacity": opacity.detach().clone(),
-                "mlp_opacity": mlp_opacity}
+                "mlp_opacity": mlp_opacity,
+                "gaussian_density_map": gaussian_density_map}
     else:
         return {"render": rendering,
                 "viewspace_points": screenspace_points,
                 "visibility_filter": radii > 0,
                 "radii": radii,
-                "volume_depth_map": volume_depth_map}
+                "volume_depth_map": volume_depth_map,
+                "gaussian_density_map": gaussian_density_map}
 
 def integrate(points3D, viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, kernel_size: float, scaling_modifier = 1.0, override_color = None, subpixel_offset=None):
     """

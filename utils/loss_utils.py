@@ -174,7 +174,8 @@ def get_loss(render_pkg, opt, mlp_warm_up):
     # eikonal loss
     eikonal_loss = ((sdf_gradient.norm(2, dim=-1) - 1) ** 2).sum()
     # gaussian sdf loss
-    sdf_loss = torch.abs(gaussian_sdf).mean() + torch.abs(disk_sdf).mean() + 10*(disk_sdf).var()
+    # sdf_loss = torch.abs(gaussian_sdf).mean() + torch.abs(disk_sdf).mean() + 10*(disk_sdf).var()
+    sdf_loss = torch.var(disk_sdf, dim=-1).sum() + torch.abs(gaussian_sdf).mean()
 
     # depth smooth loss
     depth_smooth_loss = tv_loss(depth_map) + tv_loss(render_normal_map.permute(1,2,0))

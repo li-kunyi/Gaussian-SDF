@@ -154,9 +154,6 @@ class GaussianModel:
     def get_sorted_axis(self):
         return get_sorted_axis(self.get_scaling, self.get_rotation)
 
-    def get_apperance_embedding(self, idx):
-        return self._appearance_embeddings[idx]
-    
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
 
@@ -641,7 +638,7 @@ class GaussianModel:
         selected_pts_mask = torch.logical_or(selected_pts_mask, selected_pts_mask_abs)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
-        selected_pts_mask = torch.logical_or(selected_pts_mask, self.max_radii2D > 30)
+        selected_pts_mask = torch.logical_or(selected_pts_mask, self.max_radii2D > 20)
 
         stds = self.get_scaling[selected_pts_mask].repeat(N,1)
         means =torch.zeros((stds.size(0), 3),device="cuda")
@@ -736,3 +733,5 @@ class GaussianModel:
         self.xyz_gradient_accum_abs[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,2:], dim=-1, keepdim=True)
         self.xyz_gradient_accum_abs_max[update_filter] = torch.max(self.xyz_gradient_accum_abs_max[update_filter], torch.norm(viewspace_point_tensor.grad[update_filter,2:], dim=-1, keepdim=True))
         self.denom[update_filter] += 1
+
+

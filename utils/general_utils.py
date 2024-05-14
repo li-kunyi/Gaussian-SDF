@@ -348,6 +348,19 @@ def get_samples(H, W, n, fx, fy, cx, cy, R, T, color, device):
     rays_o, rays_d = get_rays_from_uv(i, j, R, T, fx, fy, cx, cy, device)
     return rays_o, rays_d, sample_color
 
+def near_far_from_cube(self, rays_o, rays_d, bound):
+    tmin = (-bound - rays_o) / (rays_d + 1e-15) # [N, 3]
+    tmax = (bound - rays_o) / (rays_d + 1e-15)
+    near = torch.where(tmin < tmax, tmin, tmax).max(dim=-1, keepdim=True)
+    far = torch.where(tmin > tmax, tmin, tmax).min(dim=-1, keepdim=True)
+    # if far < near, means no intersection, set both near and far to inf (1e9 here)
+    mask = far < near
+    near[mask] = 1e9
+    far[mask] = 1e9
+    # restrict near to a minimal value
+    near = torch.clamp(near, min=self.near)
+    far = torch.clamp(far, max=self.far)
+    return near, far
 
 def sample_along_rays(gt_depth, n_samples, n_surface, device):
     # [N, C]
@@ -365,16 +378,6 @@ def sample_along_rays(gt_depth, n_samples, n_surface, device):
     gt_none_zero_mask = gt_none_zero_mask.squeeze(-1)
     z_vals_near_surface[gt_none_zero_mask, :] = z_vals_surface_depth_none_zero
 
-    # gt_depth_surface = gt_none_zero.repeat(1, n_surface//2)
-    # t_vals_surface = torch.rand(n_surface//2).to(device)
-    # # for thoe with validate depth, sample near the surface
-    # z1 = 0.95 * gt_depth_surface * (1.-t_vals_surface) + 0.999 * gt_depth_surface * (t_vals_surface)
-    # z2 = 1.001 * gt_depth_surface * (1.-t_vals_surface) + 1.05 * gt_depth_surface * (t_vals_surface)
-    # z_vals_surface_depth_none_zero = torch.cat((z1, gt_none_zero, z2), -1)
-    # z_vals_near_surface = torch.zeros(gt_depth.shape[0], n_surface).to(device)
-    # gt_none_zero_mask = gt_none_zero_mask.squeeze(-1)
-    # z_vals_near_surface[gt_none_zero_mask, :] = z_vals_surface_depth_none_zero
-
     # for those with zero depth, random sample along the space
     near = 0.1
     far = torch.max(gt_depth)
@@ -386,8 +389,10 @@ def sample_along_rays(gt_depth, n_samples, n_surface, device):
     # none surface
     if n_samples > 0:
         gt_depth_samples = gt_depth.repeat(1, n_samples)  # [n_pixels, n_samples]
-        near = gt_depth_samples * 0.001
-        far = gt_depth_samples*1.2  # torch.max(gt_depth*1.2).repeat(1, n_samples)
+        zero_mask = gt_depth_samples < 0.1
+        near = gt_depth_samples * 0.1
+        near[zero_mask] = 0.1  # torch.min(gt_none_zero)
+        far = torch.max(gt_depth*1.05).repeat(1, n_samples)
         t_vals = torch.linspace(0., 1., steps=n_samples, device=device)
         z_vals = near * (1.-t_vals) + far * (t_vals)
 

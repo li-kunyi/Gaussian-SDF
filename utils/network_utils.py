@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import tinycudann as tcnn
+import torch.distributions.normal as normal
 
 class Dir_Encoding(torch.nn.Module):
     """
@@ -155,7 +156,8 @@ class Pos_Encoding(nn.Module):
 class SDF(nn.Module):
     def __init__(self, pts_dim, hidden_dim=32, feature_dim=32):
         super().__init__()
-        in_dim = pts_dim + feature_dim
+        # in_dim = pts_dim + feature_dim
+        in_dim = feature_dim
         self.decoder = tcnn.Network(n_input_dims=in_dim,
                                     n_output_dims=1,
                                     network_config={
@@ -166,11 +168,33 @@ class SDF(nn.Module):
                                         "n_hidden_layers": 1})
         
     def forward(self, x, f):
-        if not x == None:
-            f = torch.cat((x, f), -1)
+        # if not x == None:
+        #     f = torch.cat((x, f), -1)
 
         return self.decoder(f)
-    
+
+class DenseLayer(nn.Linear):
+    def __init__(self, in_dim: int, out_dim: int, activation: str = "relu", *args, **kwargs) -> None:
+        self.activation = activation
+        super().__init__(in_dim, out_dim, *args, **kwargs)
+
+    def reset_parameters(self) -> None:
+        torch.nn.init.xavier_uniform_(
+            self.weight, gain=torch.nn.init.calculate_gain(self.activation))
+        if self.bias is not None:
+            torch.nn.init.zeros_(self.bias)
+
+
+class SimpleSDF(nn.Module):
+    def __init__(self, in_dim=3, out_dim=1, hidden_dim=32):
+        super().__init__()
+        self.layer1 = DenseLayer(in_dim, hidden_dim, activation="relu")
+        self.layer2 = DenseLayer(hidden_dim, out_dim, activation="linear")
+        
+    def forward(self, x):
+        y = self.layer1(x)
+        z = self.layer2(y)
+        return z
 
 class SH(nn.Module):
     def __init__(self, in_dim, out_dim, hidden_dim=32):
@@ -217,7 +241,9 @@ class LaplaceDensity(Density):  # alpha * Laplace(loc=0, scale=beta).cdf(-sdf)
             beta = self.get_beta()
 
         alpha = 1 / beta
-        return F.sigmoid(alpha * (0.5 + 0.5 * sdf.sign() * torch.expm1(-sdf.abs() / beta)))
+        return alpha * (0.5 + 0.5 * sdf.sign() * torch.expm1(-sdf.abs() / beta))
+        # dist = normal.Normal(0, 1/beta)
+        # return dist.log_prob(sdf)
 
     def get_beta(self):
         beta = self.beta.abs() + self.beta_min
