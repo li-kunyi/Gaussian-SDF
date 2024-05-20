@@ -199,4 +199,28 @@ def get_loss(render_pkg, opt, mlp_warm_up):
     return loss
 
 
+def get_loss_v2(render_pkg, depth_map, render_normal_map, opt):
+    gaussian_sdf, disk_sdf = render_pkg["gaussian_sdf"], render_pkg["disk_sdf"]
+    gaussian_normal, sdf_gradient = render_pkg["gaussian_normal"], render_pkg["sdf_gradient"]
+    gaussian_sdf2normal = sdf_gradient / (torch.norm(sdf_gradient, dim=-1)+1e-9)[:, None]
+
+    # gaussian normal loss
+    normal_loss = (torch.abs(gaussian_normal - gaussian_sdf2normal)).mean() + (torch.abs((1 - torch.sum(gaussian_normal*gaussian_sdf2normal, dim=-1)))).mean()
+    # eikonal loss
+    eikonal_loss = ((sdf_gradient.norm(2, dim=-1) - 1) ** 2).sum()
+    # gaussian sdf loss
+    # sdf_loss = torch.var(disk_sdf, dim=-1).sum() + torch.abs(gaussian_sdf).mean()
+    sdf_loss = torch.abs(gaussian_sdf).mean() + 0.5 * torch.abs(gaussian_sdf[:, None, :] - disk_sdf).sum()
+
+    # depth smooth loss
+    depth_smooth_loss = tv_loss(depth_map) + tv_loss(render_normal_map.permute(1,2,0))
+   
+    loss = opt.lambda_gaussian_normal * normal_loss + \
+           opt.lambda_eik_loss * eikonal_loss + \
+           opt.lambda_sdf * sdf_loss +\
+           opt.lambda_depth_smooth * depth_smooth_loss
+
+    return loss
+
+
 

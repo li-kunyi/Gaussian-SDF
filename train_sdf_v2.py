@@ -17,13 +17,14 @@ import torch
 import torchvision
 import random
 from random import randint
-from utils.loss_utils import l1_loss, ssim
+from utils.loss_utils import l1_loss, ssim, get_loss_v2, tv_loss
 from gaussian_renderer import sdf_render_v2, network_gui
 import sys
 from scene import Scene, GaussianModel
 from utils.general_utils import safe_state
 import uuid
 import marching_cubes as mcubes
+from skimage.measure import marching_cubes
 import trimesh
 from tqdm import tqdm
 from utils.image_utils import psnr
@@ -186,21 +187,29 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # Final loss
         loss = rgb_loss + depth_normal_loss * lambda_depth_normal + distortion_loss * lambda_distortion 
 
-        # if iteration > 0:
-        #     xyz = gaussians.get_xyz.requires_grad_(True)
-        #     sdf = gaussians.query_sdf(xyz)
-        #     d_output = torch.ones_like(sdf, requires_grad=False, device=xyz.device)
-        #     gradients = torch.autograd.grad(
-        #         outputs=sdf,
-        #         inputs=xyz,
-        #         grad_outputs=d_output,
-        #         create_graph=True,
-        #         retain_graph=True,
-        #         only_inputs=True)[0]
-        #     sdf_loss =  torch.abs(sdf).mean()
-        #     eikonal_loss = ((gradients.norm(2, dim=-1) - 1) ** 2).sum()
+        gaussian_sdf, sdf_gradient = render_pkg["gaussian_sdf"], render_pkg["sdf_gradient"]
 
-        #     loss += 0.1 * sdf_loss + 0.1 * eikonal_loss
+        if iteration > 2000:
+            # eikonal loss
+            eikonal_loss = ((sdf_gradient.norm(2, dim=-1) - 1) ** 2).mean()
+            loss += opt.lambda_eik_loss * eikonal_loss
+            sdf_loss = torch.abs(gaussian_sdf).mean()
+            # depth smooth loss
+            depth_smooth_loss = tv_loss(depth) + tv_loss(render_normal_world.permute(1,2,0)) + tv_loss(depth_normal.permute(1,2,0))
+
+            gaussian_sdf, sdf_gradient = render_pkg["gaussian_sdf"], render_pkg["sdf_gradient"]
+            gaussian_normal, disk_sdf = render_pkg["gaussian_normal"], render_pkg["disk_sdf"]
+            gaussian_sdf2normal = sdf_gradient / (torch.norm(sdf_gradient, dim=-1)+1e-9)[:, None]
+
+            # gaussian normal loss
+            normal_loss = (torch.abs(gaussian_normal - gaussian_sdf2normal)).mean() + (torch.abs((1 - torch.sum(gaussian_normal*gaussian_sdf2normal, dim=-1)))).mean()
+            
+            # gaussian disk point sdf loss
+            disk_loss =torch.abs(gaussian_sdf[:, None, :] - disk_sdf).mean()
+        
+            loss += opt.lambda_gaussian_normal * normal_loss + opt.lambda_sdf * 0.5 * disk_loss
+            
+            loss += opt.lambda_sdf * sdf_loss + opt.lambda_depth_smooth * depth_smooth_loss
         loss.backward()
         
         iter_end.record()
@@ -277,33 +286,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_sdf()
 
-            if iteration % 1000 == 0:
-                # 计算体素格子的尺寸
-                point_cloud = gaussians.get_xyz.cpu().numpy()
-                sdf_values = gaussians._sdf.cpu().numpy()
-                min_bound = np.min(point_cloud, axis=0)
-                max_bound = np.max(point_cloud, axis=0)
-                grid_shape = ((max_bound - min_bound) / 0.01).astype(int) + 1
-
-                # 创建体素格子并初始化为负无穷
-                sdf_grid = np.full(grid_shape, -np.inf)
-
-                # 将点云数据和对应的 SDF 值映射到体素格子上
-                indices = ((point_cloud - min_bound) / 0.01).astype(int)
-                sdf_grid[indices[:, 0], indices[:, 1], indices[:, 2]] = sdf_values.squeeze()
-
-                print('Running Marching Cubes')
-                vertices, triangles = mcubes.marching_cubes(sdf_grid, 0, truncation=0.3)
-                print('done', vertices.shape, triangles.shape)
-
-                mesh = trimesh.Trimesh(vertices, triangles, process=False)
-
-                mesh.export(f"{dataset.model_path}/sdf_v2_mesh_{iteration}.ply")
-
-                print('Mesh saved')
-
-                    
-        
             # Optimizer step
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
@@ -312,6 +294,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+
+            if iteration > 2000 and iteration % 1000 == 0:
+                sdf_grid = gaussians.sdf_grid.detach().cpu().numpy()
+
+                print('Running Marching Cubes')
+                verts, faces, normals, values = marching_cubes(sdf_grid, level=0)
+                print('done', verts.shape, faces.shape)
+
+                mesh = trimesh.Trimesh(verts, faces, process=False)
+                mesh.export(f"{dataset.model_path}/sdf_v2_mesh_{iteration}.ply")
+                print('Mesh saved')
+
             
     
 def prepare_output_and_logger(args):    

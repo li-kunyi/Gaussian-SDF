@@ -1,1 +1,0 @@
-Namespace(data_device='cuda', eval=True, images='images', kernel_size=0.0, load_allres=False, model_path='outputs/blender/lego', ray_jitter=False, ref_sh_degree=3, resample_gt_image=False, resolution=-1, sample_more_highres=False, sh_degree=1, source_path='/home/kunyi/work/data/NeRF/lego', use_decoupled_appearance=False, white_background=False)

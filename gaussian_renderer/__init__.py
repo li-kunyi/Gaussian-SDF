@@ -11,6 +11,7 @@
 
 import torch
 import math
+import numpy as np
 from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
 from scene.sdf_gaussian_model_v2 import GaussianModel
 # from scene.gaussian_model import GaussianModel
@@ -160,7 +161,9 @@ def sdf_render_v2(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
 
     means3D = pc.get_xyz
     means2D = screenspace_points
-    opacity = pc.get_opacity
+    # opacity = pc.get_opacity
+    gaussian_sdf = pc.query_sdf(means3D)
+    density = pc.opacity_activation(gaussian_sdf)
 
     sorted_axis, sorted_scale = pc.get_sorted_axis()
     normal_axis = sorted_axis[:, 0, :]
@@ -173,8 +176,12 @@ def sdf_render_v2(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
     u_scales = sorted_scale[:, 1]
     v_scales = sorted_scale[:, 2]
 
-    free_energy = min_scales[:, None] * opacity
+    free_energy = min_scales[:, None] * density
     opacity = 1 - torch.exp(-free_energy)  # probability of it is not empty here
+
+    disk_points = sample_ellipse_planes(normal, u_axis, v_axis, u_scales, v_scales, means3D, num_samples=9)
+
+    disk_sdf = pc.query_sdf(disk_points.reshape(-1, 3)).reshape(disk_points.shape[0], disk_points.shape[1], 1)
 
     # If precomputed 3d covariance is provided, use it. If not, then it will be computed from
     # scaling / rotation by the rasterizer.
@@ -223,14 +230,35 @@ def sdf_render_v2(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
         rotations = rotations,
         cov3D_precomp = cov3D_precomp,
         view2gaussian_precomp=view2gaussian_precomp)
+    
+    sdf_gradient = gradient(means3D, pc.query_sdf)
 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
     return {"render": rendered_image,
             "viewspace_points": screenspace_points,
             "visibility_filter" : radii > 0,
-            "radii": radii}
+            "radii": radii,
+            "gaussian_sdf": gaussian_sdf,
+            "sdf_gradient": sdf_gradient,
+            "disk_sdf": disk_sdf,
+            "gaussian_normal": normal}
 
+def gradient(x, fn, voxel_size=0.01):    
+    x = torch.reshape(x, [-1, x.shape[-1]]).float()
+    eps = voxel_size / np.sqrt(3)
+    k1 = torch.tensor([1, -1, -1], dtype=x.dtype, device=x.device)  
+    k2 = torch.tensor([-1, -1, 1], dtype=x.dtype, device=x.device)  
+    k3 = torch.tensor([-1, 1, -1], dtype=x.dtype, device=x.device)  
+    k4 = torch.tensor([1, 1, 1], dtype=x.dtype, device=x.device)  
+    
+    sdf1 = fn(x + k1 * eps)
+    sdf2 = fn(x + k2 * eps)
+    sdf3 = fn(x + k3 * eps)
+    sdf4 = fn(x + k4 * eps)
+    gradients = (k1*sdf1 + k2*sdf2 + k3*sdf3 + k4*sdf4) / (4.0 * eps)
+    
+    return gradients
 
 def sample_ellipse_planes(normals, U, V, u_scale, v_scale, centers, num_samples=9):
     """
