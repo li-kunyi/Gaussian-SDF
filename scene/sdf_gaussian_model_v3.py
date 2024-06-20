@@ -13,8 +13,9 @@ from utils.general_utils import strip_symmetric, build_scaling_rotation, get_min
 import torch.nn.functional as F
 import trimesh
 from utils.vis_utils import save_points
-from utils.network_utils import LaplaceDensity, SimpleSDF
+from utils.network_utils import LaplaceDensity, LaplaceDensitySH, SimpleSDF
 from scene.appearance_network import AppearanceNetwork
+from scipy.spatial import cKDTree
 
 class GaussianModel:
 
@@ -56,7 +57,7 @@ class GaussianModel:
         self.setup_functions()
 
         # self.query_sdf = SimpleSDF(cfg, self.bounding_box, in_dim=3, out_dim=1, hidden_dim=32).cuda()
-        self.sdf2opacity = LaplaceDensity(**cfg['density']).cuda()
+        self.sdf2opacity = LaplaceDensitySH(**cfg['density'], in_dim=3*(self.max_sh_degree+1)**2).cuda()
         self.opacity_activation = self.sdf2opacity.density_func
 
         # appearance network and appearance embedding
@@ -70,7 +71,7 @@ class GaussianModel:
         # self.sdf_grid.requires_grad_(True)
         
 
-    def set_bbox(self, enlarge=1.1):
+    def set_bbox(self, enlarge=1.2):
         '''
         Get bounding box of current scene, enlarge a little bit.
         '''
@@ -179,11 +180,6 @@ class GaussianModel:
     #     return self.opacity_activation(self._sdf)
     
     @property
-    def get_opacity(self):
-        sdf = self.query_sdf(self._xyz)
-        return self.opacity_activation(sdf)
-    
-    @property
     def get_opacity_with_3D_filter(self):
         sdf = self.query_sdf(self._xyz)
         opacity = self.opacity_activation(sdf)
@@ -197,6 +193,20 @@ class GaussianModel:
         det2 = scales_after_square.prod(dim=1) 
         coef = torch.sqrt(det1 / det2)
         return opacity * coef[..., None]
+    
+    # def get_opacity(self, reset=False):
+    #     sdf = self.query_sdf(self._xyz)
+    #     density = self.opacity_activation(sdf)
+    #     dists, indices = self.query_kdtree(points=self._xyz, query_points=self._xyz, k=10, reset=reset)
+
+
+    #     return opacity
+    
+    def query_kdtree(self, points=None, query_points=None, k=10, reset=False):
+        if reset:
+            self.tree = cKDTree(points)
+        dists, indices = self.tree.query(query_points, k=k)
+        return dists, indices
     
     def get_apperance_embedding(self, idx):
         return self._appearance_embeddings[idx]
@@ -321,6 +331,7 @@ class GaussianModel:
 
         dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)
         scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
+        # scales[:, 0] = scales[:, 0] * 2
         rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
         rots[:, 0] = 1
 
@@ -364,7 +375,7 @@ class GaussianModel:
                                                     max_steps=training_args.position_lr_max_steps)
         
         self.network_lr = training_args.network_lr
-        sdf_l = [{'params': self.sdf2opacity.parameters(), 'lr': training_args.network_lr, "name": "beta"}]
+        sdf_l = [{'params': self.sdf2opacity.parameters(), 'lr': training_args.beta_lr, "name": "beta"}]
         self.network_optimizer = torch.optim.Adam(sdf_l, lr=0.0, eps=1e-15)
 
 
@@ -680,8 +691,7 @@ class GaussianModel:
                                               torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
         # selected_pts_mask = torch.logical_or(selected_pts_mask, self.max_radii2D > 50)
 
-        # _, sorted_scale = self.get_sorted_axis()
-        # max_scales = sorted_scale[:, 2]
+        # max_scales = torch.max(self.get_scaling, dim=1).values
         # selected_pts_mask = torch.logical_or(selected_pts_mask, max_scales > 5 * max_scales.mean())
 
         stds = self.get_scaling[selected_pts_mask].repeat(N,1)
@@ -735,30 +745,51 @@ class GaussianModel:
         min_values = center - length * 1.1 / 2
         max_values = center + length * 1.1 / 2
 
+        # max_values = self.bounding_box[:, 1]
+        # min_values = self.bounding_box[:, 0]
+
         rand_x = torch.rand(N).cuda() * (max_values[0] - min_values[0]) + min_values[0]
         rand_y = torch.rand(N).cuda() * (max_values[1] - min_values[1]) + min_values[1]
         rand_z = torch.rand(N).cuda() * (max_values[2] - min_values[2]) + min_values[2]
-        new_xyz = torch.stack([rand_x, rand_y, rand_z], dim=-1)
+        new_xyz1 = torch.stack([rand_x, rand_y, rand_z], dim=-1)
 
         _, sorted_scale = self.get_sorted_axis()
         mean_scales = sorted_scale.mean(dim=0)
-
-        new_scaling = self.scaling_inverse_activation(0.8 * mean_scales.repeat(N,1))
-        new_rotation = torch.zeros((N, 4)).cuda()
-        new_rotation[:, 0] = 1
+        new_scaling1 = self.scaling_inverse_activation(mean_scales.repeat(N, 1))
+        new_rotation1 = torch.zeros((N, 4)).cuda()
+        new_rotation1[:, 0] = 1
         features = torch.zeros((N, 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
         features[:, :3, 0 ] = 1.0
         features[:, 3:, 1:] = 0.0
-        new_features_dc = features[:,:,0:1].transpose(1, 2)
-        new_features_rest = features[:,:,1:].transpose(1, 2)
+        new_features_dc1 = features[:,:,0:1].transpose(1, 2)
+        new_features_rest1 = features[:,:,1:].transpose(1, 2)
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_scaling, new_rotation)
+        # indices = torch.randint(0, self.get_scaling.shape[0], (N,))
+        # stds = self.get_scaling[indices]
+        # means =torch.zeros((stds.size(0), 3),device="cuda")
+        # samples = torch.normal(mean=means, std=stds)
+        # rots = build_rotation(self._rotation[indices])
+        # new_xyz2 = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[indices]
+        # new_scaling2 = self.scaling_inverse_activation(self.get_scaling[indices])
+        # new_rotation2 = torch.zeros((N, 4)).cuda()
+        # new_rotation1[:, 0] = 1
+        # new_features_dc2 = torch.ones_like(self._features_dc[indices]).cuda()
+        # new_features_rest2 = torch.zeros_like(self._features_rest[indices]).cuda()
+
+        # new_xyz = torch.cat((new_xyz1, new_xyz2), dim=0)
+        # new_scaling = torch.cat((new_scaling1, new_scaling2), dim=0)
+        # new_rotation = torch.cat((new_rotation1, new_rotation2), dim=0)
+        # new_features_dc = torch.cat((new_features_dc1, new_features_dc2), dim=0)
+        # new_features_rest = torch.cat((new_features_rest1, new_features_rest2), dim=0)
+
+        self.densification_postfix(new_xyz1, new_features_dc1, new_features_rest1, new_scaling1, new_rotation1)
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, random_densify=False):
         gaussian_sdf = self.query_sdf(self._xyz)
-        density = self.opacity_activation(gaussian_sdf)
+        shs = self.get_features.transpose(1, 2).reshape(-1, 3*(self.max_sh_degree+1)**2)
+        density = self.opacity_activation(gaussian_sdf, shs)
         opacity = density
 
         prune_mask = (opacity < min_opacity).squeeze()
@@ -766,9 +797,9 @@ class GaussianModel:
             big_points_vs = self.max_radii2D > max_screen_size
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
-            # bound_mask1 = (gaussian_sdf < -0.5).squeeze()
-            # bound_mask2 = (gaussian_sdf > 0.5).squeeze().squeeze()
-            # prune_mask = torch.logical_or(torch.logical_or(prune_mask, bound_mask2), bound_mask1)
+            bound_mask1 = (gaussian_sdf < -0.1).squeeze()
+            bound_mask2 = (gaussian_sdf > 0.1).squeeze().squeeze()
+            prune_mask = torch.logical_or(torch.logical_or(prune_mask, bound_mask2), bound_mask1)
             
         self.prune_points(prune_mask)
         prune = self._xyz.shape[0]
@@ -788,7 +819,8 @@ class GaussianModel:
         self.densify_and_split(grads, max_grad, grads_abs, Q, extent)
         split = self._xyz.shape[0]
 
-        # self.random_densify(N=2000)
+        if random_densify:
+            self.random_densify(N=1000)
         
         # torch.cuda.empty_cache()
         return clone - before, split - clone, split - prune

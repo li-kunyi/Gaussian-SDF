@@ -13,7 +13,7 @@ import torch
 import math
 import numpy as np
 from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
-from scene.sdf_gaussian_model_v2 import GaussianModel
+from scene.sdf_gaussian_model_v3 import GaussianModel
 # from scene.gaussian_model import GaussianModel
 import torch.nn.functional as F
 from utils.sh_utils import eval_sh
@@ -161,27 +161,21 @@ def sdf_render_v2(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
 
     means3D = pc.get_xyz
     means2D = screenspace_points
-    # opacity = pc.get_opacity
     gaussian_sdf = pc.query_sdf(means3D)
-    density = pc.opacity_activation(gaussian_sdf)
 
     sorted_axis, sorted_scale = pc.get_sorted_axis()
-    normal_axis = sorted_axis[:, 0, :]
-    normal = normal_axis / normal_axis.norm(dim=1, keepdim=True)  # (N, 3)
-    u_axis = sorted_axis[:, 1, :]
-    u_axis = u_axis / u_axis.norm(dim=1, keepdim=True)  # (N, 3)
-    v_axis = sorted_axis[:, 2, :]
-    v_axis = v_axis / v_axis.norm(dim=1, keepdim=True)  # (N, 3)
+    min_axis = sorted_axis[:, :, 0]
+    # normal = normal_axis / normal_axis.norm(dim=1, keepdim=True)  # (N, 3)
+    u_axis = sorted_axis[:, :, 1]
+    # u_axis = u_axis / u_axis.norm(dim=1, keepdim=True)  # (N, 3)
+    v_axis = sorted_axis[:, :, 2]
+    # v_axis = v_axis / v_axis.norm(dim=1, keepdim=True)  # (N, 3)
     min_scales = sorted_scale[:, 0]
     u_scales = sorted_scale[:, 1]
     v_scales = sorted_scale[:, 2]
 
-    free_energy = min_scales[:, None] * density
-    opacity = 1 - torch.exp(-free_energy)  # probability of it is not empty here
-
-    disk_points = sample_ellipse_planes(normal, u_axis, v_axis, u_scales, v_scales, means3D, num_samples=9)
-
-    disk_sdf = pc.query_sdf(disk_points.reshape(-1, 3)).reshape(disk_points.shape[0], disk_points.shape[1], 1)
+    # disk_points = sample_ellipse_planes(min_axis, u_axis, v_axis, u_scales, v_scales, means3D, num_samples=16)
+    # disk_sdf = pc.query_sdf(disk_points.reshape(-1, 3)).reshape(disk_points.shape[0], disk_points.shape[1], 1)
 
     # If precomputed 3d covariance is provided, use it. If not, then it will be computed from
     # scaling / rotation by the rasterizer.
@@ -201,6 +195,9 @@ def sdf_render_v2(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
 
     # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
     # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
+    # dir_pp = (pc.get_xyz - viewpoint_camera.camera_center.repeat(pc.get_features.shape[0], 1))
+    # dir_pp_normalized = dir_pp/dir_pp.norm(dim=1, keepdim=True)
+
     shs = None
     colors_precomp = None
     if override_color is None:
@@ -218,6 +215,8 @@ def sdf_render_v2(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
             shs = pc.get_features
     else:
         colors_precomp = override_color
+        
+    opacity = pc.opacity_activation(gaussian_sdf, shs_view.reshape(-1, 3*(pc.max_sh_degree+1)**2))
 
     # Rasterize visible Gaussians to image, obtain their radii (on screen). 
     rendered_image, radii = rasterizer(
@@ -231,7 +230,24 @@ def sdf_render_v2(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
         cov3D_precomp = cov3D_precomp,
         view2gaussian_precomp=view2gaussian_precomp)
     
-    sdf_gradient = gradient(means3D, pc.query_sdf)
+    # sdf_gradient = gradient(means3D, pc.query_sdf)
+
+    # normal_map = rendered_image[3:6, :, :].permute(1, 2, 0)
+    # depth_map = rendered_image[6, :, :]
+    # alpha_map = rendered_image[7, :, :]
+    # sdf_loss, surface_normal_loss = get_sdf_loss_with_gaussian_depth(pc, viewpoint_camera, depth_map, alpha_map, normal_map,
+    #                                             full_image=False, ray_sampling=True)
+
+    # valid_indices, valid_coordinates, proj_depth = project_to_image(viewpoint_camera, means3D, min_axis, dir_pp_normalized)
+    # valid_sdf = gaussian_sdf[valid_indices, 0]
+    # valid_min_axis = min_axis[valid_indices, :]
+    # depth_sp = depth_map[valid_coordinates[:, 0], valid_coordinates[:, 1]]
+    # alpha_sp = alpha_map[valid_coordinates[:, 0], valid_coordinates[:, 1]]
+    # normal_sp = normal_map[valid_coordinates[:, 0], valid_coordinates[:, 1]]
+    # mask = (depth_sp > 0) * (alpha_sp > 0.2)
+    # proj_sdf_loss = F.l1_loss((proj_depth + valid_sdf) * mask, depth_sp * mask)
+
+    # proj_normal_loss = (1 - (normal_sp * valid_min_axis).sum(dim=1)).mean()
 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
@@ -240,11 +256,93 @@ def sdf_render_v2(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
             "visibility_filter" : radii > 0,
             "radii": radii,
             "gaussian_sdf": gaussian_sdf,
-            "sdf_gradient": sdf_gradient,
-            "disk_sdf": disk_sdf,
-            "gaussian_normal": normal}
+            "opacity": opacity,
+            # "sdf_gradient": sdf_gradient,
+            # "disk_sdf": disk_sdf,
+            "min_axis": min_axis,
+            "min_scales": min_scales,
+            }
 
-def gradient(x, fn, voxel_size=0.01):    
+def get_sdf_loss_with_gaussian_depth(gaussians, camera, depth, normal, 
+                                     n_pixel=10000, n_sample=12, n_sample_surface=5, 
+                                     truncation=0.01, full_image=False, ray_sampling=True, 
+                                     device='cuda'):  
+    with torch.no_grad():
+        H, W = depth.shape
+        fx = W / (2 * math.tan(camera.FoVx / 2))
+        fy = H / (2 * math.tan(camera.FoVy / 2))
+        # fx = W * 0.7
+        # fy = W * 0.7
+        c2w = (camera.world_view_transform.T).inverse()
+        R = c2w[:3, :3]
+        T = c2w[:3, 3]
+
+        if full_image:
+            rays_o, rays_d = get_all_rays(H, W, fx, fy, (W)/2, (H)/2, R, T, device)
+            rays_o = rays_o.reshape(-1, 3)  # [N, 3]
+            rays_d = rays_d.reshape(-1, 3)
+            sp = torch.cat((depth[..., None], normal), dim=-1).reshape(-1, 5)
+        else:
+        
+            rays_o, rays_d, sp = get_samples(0, H-0, 0, W-0, n_pixel, fx, fy, (W-1)/2, (H-1)/2, R, T,
+                                            torch.cat((depth[:, :, None], normal), dim=-1),
+                                            device)  # [n_pixels, C]
+        # rays_o = rays_o[sp[:, 0] > 0]
+        # rays_d = rays_d[sp[:, 0] > 0]
+        # depth_sp = sp[sp[:, 0] > 0, 0:1]
+        # alpha_sp = sp[sp[:, 0] > 0, 1:2]
+        # normal_sp = sp[sp[:, 0] > 0, 2:5]
+        # d_normal_sp = sp[sp[:, 0] > 0, 5:]
+        
+        depth_sp = sp[..., 0:1]
+        normal_sp = sp[..., 1:]
+        surface_pts = rays_o[:, None, :] + rays_d[:, None, :] * depth_sp[:, :, None] # [n_rays, 1, 3]
+
+        if ray_sampling:
+            z_vals_surface, z_vals = sample_along_rays(depth_sp, n_sample, n_sample_surface, device)  # [n_pixels, n_samples]
+        else:
+            z_vals = depth_sp
+
+        pts = rays_o[:, None, :] + rays_d[:, None, :] * z_vals[..., :, None]  # [n_rays, n_samples, 3]
+
+    bounding_box = gaussians.bounding_box
+    mask0 = (pts[..., 0] > bounding_box[0, 0]) * (pts[..., 0] < bounding_box[0, 1])
+    mask1 = (pts[..., 1] > bounding_box[1, 0]) * (pts[..., 1] < bounding_box[1, 1])
+    mask2 = (pts[..., 2] > bounding_box[2, 0]) * (pts[..., 2] < bounding_box[2, 1])
+    bound_mask = torch.logical_or(torch.logical_or(mask0, mask1), mask2)
+
+    sdf = gaussians.query_sdf(pts.reshape(-1, 3)).reshape(pts.shape[0], pts.shape[1])
+
+    front_mask = torch.where(z_vals < (depth_sp - 0.01), torch.ones_like(z_vals), torch.zeros_like(z_vals))
+    # after truncation
+    back_mask = torch.where(z_vals > (depth_sp + 0.01), torch.ones_like(z_vals), torch.zeros_like(z_vals))
+    # valid mask
+    depth_mask = torch.where(depth_sp > 0.0, torch.ones_like(depth_sp), torch.zeros_like(depth_sp))
+
+    # Valid sdf region
+    sdf_mask = (1.0 - front_mask) * (1.0 - back_mask) * depth_mask * bound_mask
+    front_mask = front_mask * depth_mask * bound_mask
+
+    zero_d_mask = torch.where(depth_sp < 0.1, torch.ones_like(depth_sp), torch.zeros_like(depth_sp)) * bound_mask
+
+    volume_fs_loss = F.l1_loss(sdf * front_mask, torch.ones_like(sdf) * front_mask) + F.l1_loss(sdf * zero_d_mask, torch.ones_like(sdf) * zero_d_mask)
+    volume_sdf_loss = F.l1_loss((z_vals + sdf) * sdf_mask, depth_sp * sdf_mask)
+
+    surface_normal_loss = torch.tensor(0).cuda()
+    eikonal_loss = torch.tensor(0).cuda()
+    normal_dir_loss = torch.tensor(0).cuda()
+    # if torch.count_nonzero(depth_mask) > 0:
+        # surface_gradient = gradient(surface_pts.reshape(-1, 3), gaussians.query_sdf)
+        # eikonal_loss = ((surface_gradient.norm(2, dim=-1)[:, None] * depth_mask - 1) ** 2).mean()
+
+        # surface_normal = torch.nn.functional.normalize(surface_gradient, p=2, dim=-1)
+        # surface_normal_loss = (1 - (normal_sp * surface_normal * depth_mask).sum(dim=1)).mean()
+        # normal_dir_loss = torch.relu((rays_d * surface_normal * depth_mask).sum(dim=1)).mean()
+
+    return volume_fs_loss, volume_sdf_loss, surface_normal_loss, normal_dir_loss, eikonal_loss
+
+
+def gradient(x, fn, voxel_size=0.0005):    
     x = torch.reshape(x, [-1, x.shape[-1]]).float()
     eps = voxel_size / np.sqrt(3)
     k1 = torch.tensor([1, -1, -1], dtype=x.dtype, device=x.device)  
@@ -256,7 +354,7 @@ def gradient(x, fn, voxel_size=0.01):
     sdf2 = fn(x + k2 * eps)
     sdf3 = fn(x + k3 * eps)
     sdf4 = fn(x + k4 * eps)
-    gradients = (k1*sdf1 + k2*sdf2 + k3*sdf3 + k4*sdf4) / (4.0 * eps)
+    gradients = (k1 * sdf1 + k2 * sdf2 + k3 * sdf3 + k4 * sdf4) / (4.0 * eps)
     
     return gradients
 
@@ -280,8 +378,8 @@ def sample_ellipse_planes(normals, U, V, u_scale, v_scale, centers, num_samples=
     v_sample = torch.rand(normals.shape[0], num_samples).to(normals.device)
 
     # Compute sampled points in local coordinates for all planes
-    u = u_scale[:, None] * u_sample
-    v = v_scale[:, None] * v_sample
+    u = 1.2 * u_scale[:, None] * u_sample
+    v = 1.2 * v_scale[:, None] * v_sample
 
     # Transform local coordinates to world coordinates for all planes
     local_U = u[:, :, None] * U[:, None, :]
@@ -291,12 +389,12 @@ def sample_ellipse_planes(normals, U, V, u_scale, v_scale, centers, num_samples=
 
     return world_points # [n_gaussian, n_sample, 3]
 
-def project_to_image(viewpoint_camera, pts, device="cuda"):
+def project_to_image(viewpoint_camera, pts, normal, dir_pp_normalized, device="cuda"):
     # for each gaussian, project to image coordinate to match depth
     H, W = viewpoint_camera.image_height, viewpoint_camera.image_width
     K = torch.eye(3).to(device)
-    K[0, 0] = W / (2 * math.tan(viewpoint_camera.FoVx  / 2))
-    K[1, 1] = H / (2 * math.tan(viewpoint_camera.FoVy  / 2))
+    K[0, 0] = W / (2 * math.tan(viewpoint_camera.FoVx / 2))
+    K[1, 1] = H / (2 * math.tan(viewpoint_camera.FoVy / 2))
     K[0, 2] = (W - 1) / 2
     K[1, 2] = (H - 1) / 2
     rel_w2c = viewpoint_camera.world_view_transform.T
@@ -306,9 +404,11 @@ def project_to_image(viewpoint_camera, pts, device="cuda"):
     u, v, d = transformed_pts[:, 0], transformed_pts[:, 1], transformed_pts[:, 2]
     image_coordinates = (K @ (torch.stack([u / d, v / d, d / d], dim=1)).T).T[:, :2]
     valid_indices = (image_coordinates[:, 0] > 0) & (image_coordinates[:, 0] < W-1) & \
-                    (image_coordinates[:, 1] > 0) & (image_coordinates[:, 1] < H-1) & (d > 0)
+                    (image_coordinates[:, 1] > 0) & (image_coordinates[:, 1] < H-1) & \
+                    (d > 0) & ((normal * dir_pp_normalized).sum(dim=1) < 0)
     valid_coordinates = torch.round(image_coordinates[valid_indices, :]).long()
-    return valid_indices, valid_coordinates
+    proj_depth = d[valid_indices]
+    return valid_indices, valid_coordinates, proj_depth
 
 
 def get_values(mlp, pts, reflect_normals, scales, num_process=10000, device='cuda'):    
@@ -715,6 +815,111 @@ def integrate(points3D, viewpoint_camera, pc : GaussianModel, pipe, bg_color : t
         cov3D_precomp = pc.get_covariance(scaling_modifier)
     else:
         scales = pc.get_scaling_with_3D_filter
+        rotations = pc.get_rotation
+
+    view2gaussian_precomp = None
+    # pipe.compute_view2gaussian_python = True
+    if pipe.compute_view2gaussian_python:
+        view2gaussian_precomp = pc.get_view2gaussian(raster_settings.viewmatrix)
+
+    # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
+    # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
+    shs = None
+    colors_precomp = None
+    if override_color is None:
+        if pipe.convert_SHs_python:
+            shs_view = pc.get_features.transpose(1, 2).view(-1, 3, (pc.max_sh_degree+1)**2)
+            dir_pp = (pc.get_xyz - viewpoint_camera.camera_center.repeat(pc.get_features.shape[0], 1))
+            # # we local direction
+            # cam_pos_local = view2gaussian_precomp[:, 3, :3]
+            # cam_pos_local_scaled = cam_pos_local / scales
+            # dir_pp = -cam_pos_local_scaled
+            dir_pp_normalized = dir_pp/dir_pp.norm(dim=1, keepdim=True)
+            sh2rgb = eval_sh(pc.active_sh_degree, shs_view, dir_pp_normalized)
+            colors_precomp = torch.clamp_min(sh2rgb + 0.5, 0.0)
+        else:
+            shs = pc.get_features
+    else:
+        colors_precomp = override_color
+
+    # Rasterize visible Gaussians to image, obtain their radii (on screen). 
+    rendered_image, alpha_integrated, color_integrated, radii = rasterizer.integrate(
+        points3D = points3D,
+        means3D = means3D,
+        means2D = means2D,
+        shs = shs,
+        colors_precomp = colors_precomp,
+        opacities = opacity,
+        scales = scales,
+        rotations = rotations,
+        cov3D_precomp = cov3D_precomp,
+        view2gaussian_precomp=view2gaussian_precomp)
+
+    # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
+    # They will be excluded from value updates used in the splitting criteria.
+    return {"render": rendered_image,
+            "alpha_integrated": alpha_integrated,
+            "color_integrated": color_integrated,
+            "viewspace_points": screenspace_points,
+            "visibility_filter" : radii > 0,
+            "radii": radii}
+
+
+
+def integrate_sdf(points3D, viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, kernel_size: float, scaling_modifier = 1.0, override_color = None, subpixel_offset=None):
+    """
+    integrate Gaussians to the points, we also render the image for visual comparison. 
+    
+    Background tensor (bg_color) must be on GPU!
+    """
+ 
+    # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
+    screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
+    try:
+        screenspace_points.retain_grad()
+    except:
+        pass
+
+    # Set up rasterization configuration
+    tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
+    tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
+
+    if subpixel_offset is None:
+        subpixel_offset = torch.zeros((int(viewpoint_camera.image_height), int(viewpoint_camera.image_width), 2), dtype=torch.float32, device="cuda")
+        
+    raster_settings = GaussianRasterizationSettings(
+        image_height=int(viewpoint_camera.image_height),
+        image_width=int(viewpoint_camera.image_width),
+        tanfovx=tanfovx,
+        tanfovy=tanfovy,
+        kernel_size=kernel_size,
+        subpixel_offset=subpixel_offset,
+        bg=bg_color,
+        scale_modifier=scaling_modifier,
+        viewmatrix=viewpoint_camera.world_view_transform,
+        projmatrix=viewpoint_camera.full_proj_transform,
+        sh_degree=pc.active_sh_degree,
+        campos=viewpoint_camera.camera_center,
+        prefiltered=False,
+        debug=pipe.debug
+    )
+
+    rasterizer = GaussianRasterizer(raster_settings=raster_settings)
+
+    means3D = pc.get_xyz
+    means2D = screenspace_points
+    gaussian_sdf = pc.query_sdf(means3D)
+    opacity = pc.opacity_activation(gaussian_sdf)
+
+    # If precomputed 3d covariance is provided, use it. If not, then it will be computed from
+    # scaling / rotation by the rasterizer.
+    scales = None
+    rotations = None
+    cov3D_precomp = None
+    if pipe.compute_cov3D_python:
+        cov3D_precomp = pc.get_covariance(scaling_modifier)
+    else:
+        scales = pc.get_scaling
         rotations = pc.get_rotation
 
     view2gaussian_precomp = None

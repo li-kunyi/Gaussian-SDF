@@ -13,6 +13,7 @@ import torch
 import torch.nn.functional as F
 from torch.autograd import Variable
 from math import exp
+from utils.general_utils import coordinates
 
 def l1_loss(network_output, gt):
     return torch.abs((network_output - gt)).mean()
@@ -224,3 +225,35 @@ def get_loss_v2(render_pkg, depth_map, render_normal_map, opt):
 
 
 
+def smoothness(gaussians, sample_points=32, voxel_size=0.05, margin=0.05):
+        '''
+        Smoothness loss of feature grid
+        '''
+        bounding_box = gaussians.bounding_box
+        # min_values, _ = torch.min(gaussians.get_xyz, dim=0)
+        # max_values, _ = torch.max(gaussians.get_xyz, dim=0)
+        # length = max_values - min_values
+        # center = (max_values + min_values) / 2
+        # min_values = center - length * 1.1 / 2
+        # max_values = center + length * 1.1 / 2
+        max_values = bounding_box[:, 1]
+        min_values = bounding_box[:, 0]
+        volume = max_values - min_values
+
+        grid_size = (sample_points-1) * voxel_size
+        offset_max = max_values - min_values - grid_size - 2 * margin
+
+        offset = torch.rand(3).to(offset_max) * offset_max + margin
+        coords = coordinates(sample_points - 1, 'cpu', flatten=False).float().to(volume)
+        pts = (coords + torch.rand((1,1,1,3)).to(volume)) * voxel_size + min_values + offset
+
+        pts_tcnn = (pts - bounding_box[:, 0]) / (bounding_box[:, 1] - bounding_box[:, 0])
+        
+        sdf = gaussians.query_sdf(pts_tcnn.reshape(-1, pts_tcnn.shape[-1])).reshape(pts.shape[:-1], -1)
+        tv_x = torch.pow(sdf[1:,...]-sdf[:-1,...], 2).sum()
+        tv_y = torch.pow(sdf[:,1:,...]-sdf[:,:-1,...], 2).sum()
+        tv_z = torch.pow(sdf[:,:,1:,...]-sdf[:,:,:-1,...], 2).sum()
+
+        loss = (tv_x + tv_y + tv_z)/ (sample_points**3)
+
+        return loss

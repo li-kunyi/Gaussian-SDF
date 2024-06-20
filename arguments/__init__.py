@@ -46,13 +46,13 @@ class ParamGroup:
 
 class ModelParams(ParamGroup): 
     def __init__(self, parser, sentinel=False):
-        self.sh_degree = 1
+        self.sh_degree = 3
         self.ref_sh_degree = 3
         self._source_path = ""
         self._model_path = ""
         self._images = "images"
         self._resolution = -1
-        self._white_background = False
+        self._white_background = True
         self.data_device = "cuda"
         self.eval = False
         self._kernel_size = 0.0
@@ -71,7 +71,7 @@ class ModelParams(ParamGroup):
 
 class PipelineParams(ParamGroup):
     def __init__(self, parser):
-        self.convert_SHs_python = False
+        self.convert_SHs_python = True
         self.compute_cov3D_python = False
         self.compute_view2gaussian_python = False
         self.debug = False
@@ -80,38 +80,39 @@ class PipelineParams(ParamGroup):
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
         self.iterations = 30_000
-        self.position_lr_init = 0.00016
-        self.position_lr_final = 0.0000016
+        self.position_lr_init = 0.0002 #0.00016
+        self.position_lr_final = 0.000001 #0.0000016
         self.position_lr_delay_mult = 0.01
         self.position_lr_max_steps = 30_000
-        self.specular_lr_max_steps = 30_000
-        self.feature_lr = 0.0025
-        self.opacity_lr = 0.05
-        self.scaling_lr = 0.005
-        self.rotation_lr = 0.001
-        self.network_feature_lr = 0.01
+        # self.specular_lr_max_steps = 15_000
+        self.feature_lr = 0.005 #0.0025
+        self.opacity_lr = 0.05 #0.05
+        self.scaling_lr = 0.01 #0.005
+        self.rotation_lr = 0.002 #0.001
+        self.network_lr = 0.005
+        self.beta_lr = 0.005
         self.appearance_embeddings_lr = 0.001
         self.appearance_network_lr = 0.001
-        self.densify_grad_threshold = 0.0002
+        self.densify_grad_threshold = 0.0005
         self.densify_sdf_grad_threshold = 0.00
         self.percent_dense = 0.01
         
-        self.distortion_from_iter = 1500
-        self.depth_normal_from_iter = 1500
+        self.distortion_from_iter = 15_000
+        self.depth_normal_from_iter = 15_000
         self.densification_interval = 100
-        self.opacity_reset_interval = 2000
+        self.opacity_reset_interval = 3000
         self.densify_from_iter = 500
         self.densify_until_iter = 15_000
     
         self.lambda_dssim = 0.2
-        self.lambda_distortion = 100
+        self.lambda_distortion = 10
         self.lambda_depth_normal = 0.05
         # self.lambda_fs = 0.0
         # self.lambda_vloume_sdf = 1.
         # self.lambda_volume_depth = 100. #0.5
-        self.lambda_gaussian_normal = 0.00
-        self.lambda_eik_loss = 0.001
-        self.lambda_sdf = 1.
+        self.lambda_gaussian_normal = 0.005
+        self.lambda_eik_loss = 0.01
+        self.lambda_sdf = 0.1
         self.lambda_depth_smooth = 0.05
         # self.lambda_scale = 0.00
         # self.lambda_mlp_smooth = 0.001
@@ -122,16 +123,16 @@ class OptimizationParams(ParamGroup):
         self.network['variance_network'] = 0.3
         self.network['pos'] = {}
         self.network['pos']['method'] = 'OneBlob'
-        self.network['pos']['n_bins'] = 8
+        self.network['pos']['n_bins'] = 16
         self.network['grid'] = {}
         self.network['grid']['method'] = 'HashGrid'
-        self.network['grid']['hash_size'] = 14
-        self.network['grid']['voxel_size'] = 0.01
+        self.network['grid']['hash_size'] = 16
+        self.network['grid']['voxel_size'] = 0.005
         self.network['density'] = {}
         self.network['density']['params_init'] = {}
         self.network['density']['beta_min'] = 0.0001
         self.network['density']['params_init']['beta'] = 0.1
-
+        self.network['density']['params_init']['alpha'] = 1.0
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):

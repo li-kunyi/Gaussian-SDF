@@ -182,6 +182,8 @@ def get_sorted_axis(scales, rotations):
     R_sorted = torch.gather(R, dim=1, index=sorted_idx[:, :, None].repeat(1, 1, 3)).squeeze()
     return R_sorted, scale_sorted
 
+    # R = build_rotation(rotations)
+    # return R, scales
 
 def flip_align_view(normal, viewdir):
     # normal: (N, 3), viewdir: (N, 3)
@@ -280,7 +282,7 @@ def get_rays_from_uv(i, j, R, T, fx, fy, cx, cy, device):
         T = torch.from_numpy(T).to(device)
 
     dirs = torch.stack(
-        [(i-cx)/fx, -(j-cy)/fy, -torch.ones_like(i)], -1).to(device)
+        [(i-cx)/fx, (j-cy)/fy, torch.ones_like(i)], dim=-1).to(device)
     dirs = dirs.reshape(-1, 1, 3)
     # Rotate ray directions from camera frame to the world frame
     # dot product, equals to: [c2w.dot(dir) for dir in dirs]
@@ -330,7 +332,7 @@ def get_all_rays(H, W, fx, fy, cx, cy, R, T, device):
     j = j.t()
 
     dirs = torch.stack(
-        [(i-cx)/fx, -(j-cy)/fy, -torch.ones_like(i)], -1).to(device)
+        [(i-cx)/fx, (j-cy)/fy, torch.ones_like(i)], dim=-1).to(device)
     dirs = dirs.reshape(H, W, 1, 3)
     # Rotate ray directions from camera frame to the world frame
     # dot product, equals to: [c2w.dot(dir) for dir in dirs]
@@ -338,13 +340,13 @@ def get_all_rays(H, W, fx, fy, cx, cy, R, T, device):
     rays_o = T.expand(rays_d.shape)
     return rays_o, rays_d
 
-def get_samples(H, W, n, fx, fy, cx, cy, R, T, color, device):
+def get_samples(H0, H1, W0, W1, n, fx, fy, cx, cy, R, T, color, device):
     """
     Get n rays from the image region H0..H1, W0..W1.
     c2w is its camera pose and depth/color is the corresponding image tensor.
     """
     i, j, sample_color = get_sample_uv(
-        0, H, 0, W, n, color, device=device)
+        H0, H1, W0, W1, n, color, device=device)
     rays_o, rays_d = get_rays_from_uv(i, j, R, T, fx, fy, cx, cy, device)
     return rays_o, rays_d, sample_color
 
@@ -373,14 +375,15 @@ def sample_along_rays(gt_depth, n_samples, n_surface, device):
     # for thoe with validate depth, sample near the surface
     gt_depth_surface = gt_none_zero.repeat(1, n_surface)  # [n_pixels, n_samples//2]
     t_vals_surface = torch.rand(n_surface).to(device)
-    z_vals_surface_depth_none_zero = 0.95 * gt_depth_surface * (1.-t_vals_surface) + 1.05 * gt_depth_surface * (t_vals_surface)
+    # z_vals_surface_depth_none_zero = (gt_depth_surface - 0.05) * (1.-t_vals_surface) + (gt_depth_surface + 0.05) * (t_vals_surface)
+    z_vals_surface_depth_none_zero = (gt_depth_surface - 0.01) * (1.-t_vals_surface) + (gt_depth_surface + 0.01) * (t_vals_surface)
     z_vals_near_surface = torch.zeros(gt_depth.shape[0], n_surface).to(device)
     gt_none_zero_mask = gt_none_zero_mask.squeeze(-1)
     z_vals_near_surface[gt_none_zero_mask, :] = z_vals_surface_depth_none_zero
 
     # for those with zero depth, random sample along the space
-    near = 0.1
-    far = torch.max(gt_depth)
+    near = torch.min(gt_depth) - 0.1
+    far = torch.max(gt_depth) + 0.1
     t_vals_surface = torch.rand(n_surface).to(device)
     z_vals_surface_depth_zero = near * (1.-t_vals_surface) + far * (t_vals_surface)
     z_vals_surface_depth_zero.unsqueeze(0).repeat((~gt_none_zero_mask).sum(), 1)
@@ -389,10 +392,8 @@ def sample_along_rays(gt_depth, n_samples, n_surface, device):
     # none surface
     if n_samples > 0:
         gt_depth_samples = gt_depth.repeat(1, n_samples)  # [n_pixels, n_samples]
-        zero_mask = gt_depth_samples < 0.1
         near = gt_depth_samples * 0.1
-        near[zero_mask] = 0.1  # torch.min(gt_none_zero)
-        far = torch.max(gt_depth*1.05).repeat(1, n_samples)
+        far = gt_depth_samples * 1.1
         t_vals = torch.linspace(0., 1., steps=n_samples, device=device)
         z_vals = near * (1.-t_vals) + far * (t_vals)
 
@@ -400,7 +401,7 @@ def sample_along_rays(gt_depth, n_samples, n_surface, device):
     else:
         z_vals, _ = torch.sort(z_vals_near_surface, -1)
 
-    return z_vals.float()
+    return z_vals_near_surface.float(), z_vals.float()
 
 def getVoxels(x_max, x_min, y_max, y_min, z_max, z_min, voxel_size=None, resolution=None):
 

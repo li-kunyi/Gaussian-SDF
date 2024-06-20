@@ -14,7 +14,7 @@ import random
 import json
 from utils.system_utils import searchForMaxIteration
 from scene.dataset_readers import sceneLoadTypeCallbacks
-from scene.sdf_gaussian_model_v2 import GaussianModel
+from scene.sdf_gaussian_model_v3 import GaussianModel
 # from scene.gaussian_model import GaussianModel
 from scene.network import SpecModel
 from arguments import ModelParams

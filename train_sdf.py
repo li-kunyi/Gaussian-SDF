@@ -399,8 +399,10 @@ if __name__ == "__main__":
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
-    args.source_path = '/home/kunyi/work/data/NeRF/lego'
-    args.model_path = 'outputs/blender/lego'
+    # args.source_path = '/home/kunyi/work/data/NeRF/lego'
+    # args.model_path = 'outputs/blender/lego'
+    args.source_path = '/home/kunyi/work/data/TNT_GOF/TrainingSet/Barn'
+    args.model_path = 'outputs/tnt/barn'
     args.eval = True
     
     print("Optimizing " + args.model_path)

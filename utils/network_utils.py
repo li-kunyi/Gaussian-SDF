@@ -186,15 +186,45 @@ class DenseLayer(nn.Linear):
 
 
 class SimpleSDF(nn.Module):
-    def __init__(self, in_dim=3, out_dim=1, hidden_dim=32):
+    def __init__(self, cfg, boudning_box, in_dim=3, hidden_dim=32):
         super().__init__()
-        self.layer1 = DenseLayer(in_dim, hidden_dim, activation="relu")
-        self.layer2 = DenseLayer(hidden_dim, out_dim, activation="linear")
+        # Sparse parametric grid encoding
+        self.boudning_box = boudning_box
+        dim_max = (self.boudning_box[:,1] - self.boudning_box[:,0]).max()
+        self.resolution = int(dim_max / cfg['grid']['voxel_size'])
+        self.grid_fn, self.grid_dim = get_encoder(cfg['grid']['method'], 
+                                                  log2_hashmap_size=cfg['grid']['hash_size'], 
+                                                  desired_resolution=self.resolution)
         
-    def forward(self, x):
-        y = self.layer1(x)
-        z = self.layer2(y)
-        return z
+        # self.pe_fn, self.pe_dim = get_encoder(cfg['pos']['method'], 
+        #                                       n_bins=cfg['pos']['n_bins'])
+        
+        self.decoder = tcnn.Network(n_input_dims=self.grid_dim, # self.pe_dim
+                                    n_output_dims=1,
+                                    network_config={
+                                        "otype": "CutlassMLP", # use CutlassMLP if not support FullyFusedMLP
+                                        "activation": "ReLU",
+                                        "output_activation": "None",
+                                        "n_neurons": hidden_dim,
+                                        "n_hidden_layers": 1})
+        
+    def forward(self, x, batch=10000):
+        num = x.shape[0]
+        out = []
+        for i in range(num // batch + 1):
+            start = i * batch
+            end = min((i + 1) * batch, num)
+            _x = x[start:end]
+            if end - start > 0:
+                _x = _x.reshape(-1, 3)
+                _p = (_x - self.boudning_box[:, 0]) / (self.boudning_box[:,1] - self.boudning_box[:,0])
+                _grid = self.grid_fn(_p)
+                # _pe = self.pe_fn(_p)
+                # out.append(self.decoder(torch.cat((_pe, _grid), dim=-1)))
+                out.append(self.decoder(_grid))
+        out = torch.cat(out, dim=0).cuda()
+        # out = torch.sigmoid(out)
+        return out
 
 class SH(nn.Module):
     def __init__(self, in_dim, out_dim, hidden_dim=32):
@@ -231,24 +261,70 @@ class Density(nn.Module):
         return self.density_func(sdf, beta=beta)
 
 
-class LaplaceDensity(Density):  # alpha * Laplace(loc=0, scale=beta).cdf(-sdf)
-    def __init__(self, params_init={}, beta_min=0.0001):
+class LaplaceDensitySH(Density):  # alpha * Laplace(loc=0, scale=beta).cdf(-sdf)
+    def __init__(self, params_init={}, beta_min=0.0001, in_dim=3):
         super().__init__(params_init=params_init)
         self.beta_min = torch.tensor(beta_min).cuda()
 
-    def density_func(self, sdf, beta=None):
+        self.decoder = tcnn.Network(n_input_dims=in_dim,
+                                    n_output_dims=1,
+                                    network_config={
+                                    "otype": "CutlassMLP", # use CutlassMLP if not support FullyFusedMLP
+                                    "activation": "ReLU",
+                                    "output_activation": "None",
+                                    "n_neurons": 16,
+                                    "n_hidden_layers": 1})      
+
+    def density_func(self, sdf, shs=None, beta=None):
         if beta is None:
             beta = self.get_beta()
 
-        alpha = 1 / beta
-        return alpha * (0.5 + 0.5 * sdf.sign() * torch.expm1(-sdf.abs() / beta))
-        # dist = normal.Normal(0, 1/beta)
-        # return dist.log_prob(sdf)
+        # weight = torch.sigmoid(self.decoder(shs))
+        alpha = self.get_alpha()
+
+        # return alpha * torch.exp(-(sdf ** 2)/(2 * (beta ** 2)))
+        # return torch.exp(- sdf / beta) / (1 + torch.exp(- sdf / beta)) ** 2
+        # return alpha * (0.5 + 0.5 * sdf.sign() * torch.expm1(-sdf.abs() / beta))
+        return torch.clip(alpha * (0.5 + 0.5 * sdf.sign() * torch.expm1(-sdf.abs() / beta)), max=1.0)
 
     def get_beta(self):
+        # beta = torch.clip(self.beta.abs() + self.beta_min, min=0.01)
         beta = self.beta.abs() + self.beta_min
         return beta
     
+    def get_alpha(self):
+        # alpha = torch.sigmoid(self.alpha)
+        alpha = self.alpha
+        return alpha
+    
+class LaplaceDensity(Density):  # alpha * Laplace(loc=0, scale=beta).cdf(-sdf)
+    def __init__(self, params_init={}, beta_min=0.0001, in_dim=3):
+        super().__init__(params_init=params_init)
+        self.beta_min = torch.tensor(beta_min).cuda()
+
+    def density_func(self, sdf, shs=None, beta=None):
+        if beta is None:
+            beta = self.get_beta()
+
+        # alpha = torch.clip(self.alpha, max=1.0)
+        
+        # alpha = 1 / beta
+        alpha = self.get_alpha()
+
+        # return alpha * torch.exp(-(sdf ** 2)/(2 * (beta ** 2)))
+        # return 4 * torch.exp(- sdf / beta) / (1 + torch.exp(- sdf /sd beta)) ** 2
+        return (0.5 + 0.5 * sdf.sign() * torch.expm1(-sdf.abs() / beta))
+        # return torch.clip(alpha * (0.5 + 0.5 * sdf.sign() * torch.expm1(-sdf.abs() / beta)), max=1.0)
+
+    def get_beta(self):
+        # beta = torch.clip(self.beta.abs() + self.beta_min, min=0.01)
+        beta = self.beta.abs() + self.beta_min
+        return beta
+    
+    def get_alpha(self):
+        # alpha = torch.sigmoid(self.alpha)
+        alpha = self.alpha
+        return alpha
 
 class BellDensity(Density):  # alpha * Laplace(loc=0, scale=beta).cdf(-sdf)
     def __init__(self, params_init={}, beta_min=0.0001):
