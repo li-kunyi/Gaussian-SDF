@@ -220,15 +220,16 @@ def sdf_render_v2(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
 
     # Rasterize visible Gaussians to image, obtain their radii (on screen). 
     rendered_image, radii = rasterizer(
-        means3D = means3D,
-        means2D = means2D,
-        shs = shs,
-        colors_precomp = colors_precomp,
-        opacities = opacity,
-        scales = scales,
-        rotations = rotations,
-        cov3D_precomp = cov3D_precomp,
-        view2gaussian_precomp=view2gaussian_precomp)
+        means3D=means3D.float(),
+        means2D=means2D.float(),
+        shs=shs,
+        colors_precomp=colors_precomp.float() if colors_precomp is not None else None,
+        opacities=opacity.float(),
+        scales=scales.float() if scales is not None else None,
+        rotations=rotations.float() if rotations is not None else None,
+        cov3D_precomp=cov3D_precomp.float() if cov3D_precomp is not None else None,
+        view2gaussian_precomp=view2gaussian_precomp.float() if view2gaussian_precomp is not None else None,
+)
     
     # sdf_gradient = gradient(means3D, pc.query_sdf)
 

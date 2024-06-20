@@ -26,7 +26,7 @@ import sys
 from scene import Scene, GaussianModel
 from utils.general_utils import safe_state
 import uuid
-import marching_cubes as mcubes
+# import marching_cubes as mcubes
 from skimage.measure import marching_cubes
 from scipy.interpolate import griddata
 import torch.nn.functional as F
@@ -364,7 +364,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     densification_interval = 200
 
                 if iteration > opt.densify_from_iter and iteration % densification_interval == 0:
-                    size_threshold = 60 if iteration > 30000 else None
+                    size_threshold = 60 if iteration > 30000 else None                #改
                     densify_grad_threshold = opt.densify_grad_threshold
 
                     if iteration > 30000:
@@ -498,8 +498,8 @@ if __name__ == "__main__":
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
-    args.source_path = '/home/kunyi/work/data/NeRF/lego'
-    args.model_path = 'outputs/blender/lego'
+    # args.source_path = '/home/kunyi/work/data/NeRF/lego'
+    # args.model_path = 'outputs/blender/lego'
     
     # args.source_path = '/home/kunyi/work/data/TNT_GOF/TrainingSet/Truck'
     # args.model_path = 'outputs/tnt/truck'
