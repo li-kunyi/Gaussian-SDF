@@ -93,7 +93,7 @@ class OptimizationParams(ParamGroup):
         self.beta_lr = 0.005
         self.appearance_embeddings_lr = 0.001
         self.appearance_network_lr = 0.001
-        self.densify_grad_threshold = 0.0005
+        self.densify_grad_threshold = 0.0002  # 0.001 for tnt
         self.densify_sdf_grad_threshold = 0.00
         self.percent_dense = 0.01
         
@@ -120,14 +120,14 @@ class OptimizationParams(ParamGroup):
 
         self.network = {}
         self.network['hidden_dim'] = 32
-        self.network['variance_network'] = 0.3
-        self.network['pos'] = {}
-        self.network['pos']['method'] = 'OneBlob'
-        self.network['pos']['n_bins'] = 16
+        # self.network['variance_network'] = 0.3
+        # self.network['pos'] = {}
+        # self.network['pos']['method'] = 'OneBlob'
+        # self.network['pos']['n_bins'] = 16
         self.network['grid'] = {}
         self.network['grid']['method'] = 'HashGrid'
         self.network['grid']['hash_size'] = 16
-        self.network['grid']['voxel_size'] = 0.005
+        self.network['grid']['voxel_size'] = 0.005  # 0.1 for tnt
         self.network['density'] = {}
         self.network['density']['params_init'] = {}
         self.network['density']['beta_min'] = 0.0001

@@ -287,12 +287,6 @@ def get_sdf_loss_with_gaussian_depth(gaussians, camera, depth, normal,
             rays_o, rays_d, sp = get_samples(0, H-0, 0, W-0, n_pixel, fx, fy, (W-1)/2, (H-1)/2, R, T,
                                             torch.cat((depth[:, :, None], normal), dim=-1),
                                             device)  # [n_pixels, C]
-        # rays_o = rays_o[sp[:, 0] > 0]
-        # rays_d = rays_d[sp[:, 0] > 0]
-        # depth_sp = sp[sp[:, 0] > 0, 0:1]
-        # alpha_sp = sp[sp[:, 0] > 0, 1:2]
-        # normal_sp = sp[sp[:, 0] > 0, 2:5]
-        # d_normal_sp = sp[sp[:, 0] > 0, 5:]
         
         depth_sp = sp[..., 0:1]
         normal_sp = sp[..., 1:]
@@ -313,9 +307,9 @@ def get_sdf_loss_with_gaussian_depth(gaussians, camera, depth, normal,
 
     sdf = gaussians.query_sdf(pts.reshape(-1, 3)).reshape(pts.shape[0], pts.shape[1])
 
-    front_mask = torch.where(z_vals < (depth_sp - 0.01), torch.ones_like(z_vals), torch.zeros_like(z_vals))
+    front_mask = torch.where(z_vals < (depth_sp - truncation), torch.ones_like(z_vals), torch.zeros_like(z_vals))
     # after truncation
-    back_mask = torch.where(z_vals > (depth_sp + 0.01), torch.ones_like(z_vals), torch.zeros_like(z_vals))
+    back_mask = torch.where(z_vals > (depth_sp + truncation), torch.ones_like(z_vals), torch.zeros_like(z_vals))
     # valid mask
     depth_mask = torch.where(depth_sp > 0.0, torch.ones_like(depth_sp), torch.zeros_like(depth_sp))
 

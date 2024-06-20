@@ -202,7 +202,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         gaussian_opacity = render_pkg["opacity"]
 
         gaussian_sdf_loss = torch.abs(gaussian_sdf).mean()
-        opacity_loss = torch.abs(gaussian_opacity).mean()  #torch.exp(-(gaussian_opacity) ** 2 / 0.05).mean()
+        # opacity_loss = torch.abs(gaussian_opacity).mean()  #torch.exp(-(gaussian_opacity) ** 2 / 0.05).mean()
 
         if iteration > 600:
             loss += 0.1 * gaussian_sdf_loss
@@ -299,7 +299,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 scene.save(iteration)
                 gaussians.save_model(f"{dataset.model_path}/point_cloud/iteration_{iteration}/model.pt")
 
-            if iteration > 200 and iteration % 10000 == 0:
+            if iteration > 200 and iteration % 1000 == 0:
                 # min_values, _ = torch.min(gaussians.get_xyz, dim=0)
                 # max_values, _ = torch.max(gaussians.get_xyz, dim=0)
                 # min_bound = min_values * 1.1
@@ -349,45 +349,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 mesh.export(f"{dataset.model_path}/sdf_v2_mesh_{iteration}.ply")
                 print('Mesh saved')
                 
-                # os.makedirs(f"{dataset.model_path}/grid_images", exist_ok = True)
-                # # save slice
-                # for slice_index in range(0, sdf_grid.shape[0], 10):
-                #     sdf_slice = sdf_grid[slice_index, :, :]
-                #     plt.figure(figsize=(8, 8))
-                #     plt.imshow(sdf_slice, cmap='coolwarm', origin='lower')
-                #     plt.colorbar()
-                #     plt.title(f'SDF Slice at Depth {slice_index}_all_all')
-                #     plt.savefig(f'{dataset.model_path}/grid_images/sdf_slice_{iteration}_{slice_index}_all_all.png')
-                #     plt.close()
-                
-                # for slice_index in range(0, sdf_grid.shape[0], 10):
-                #     sdf_slice = sdf_grid[:, slice_index, :]
-                #     plt.figure(figsize=(8, 8))
-                #     plt.imshow(sdf_slice, cmap='coolwarm', origin='lower')
-                #     plt.colorbar()
-                #     plt.title(f'SDF Slice at Depth all_{slice_index}_all')
-                #     plt.savefig(f'{dataset.model_path}/grid_images/sdf_slice_{iteration}_all_{slice_index}_all.png')
-                #     plt.close()
-                
-                # for slice_index in range(0, sdf_grid.shape[0], 10):
-                #     sdf_slice = sdf_grid[:, :, slice_index]
-                #     plt.figure(figsize=(8, 8))
-                #     plt.imshow(sdf_slice, cmap='coolwarm', origin='lower')
-                #     plt.colorbar()
-                #     plt.title(f'SDF Slice at Depth all_all_{slice_index}')
-                #     plt.savefig(f'{dataset.model_path}/grid_images/sdf_slice_{iteration}_all_all_{slice_index}.png')
-                #     plt.close()
-                
-                # disk_points = render_pkg["disk_points"].reshape(-1, 3)
-                # l = ['x', 'y', 'z']
-                # dtype_full = [(attribute, 'f4') for attribute in l]
-
-                # elements = np.empty(disk_points.shape[0], dtype=dtype_full)
-                # attributes = disk_points
-                # elements[:] = list(map(tuple, attributes))
-                # el = PlyElement.describe(elements, 'vertex')
-                # PlyData([el]).write(f'{dataset.model_path}/disk_point_{iteration}.ply')
-
+               
             # Densification
             if iteration < opt.densify_until_iter:
                 # Keep track of max radii in image-space for pruning
@@ -403,7 +365,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
                 if iteration > opt.densify_from_iter and iteration % densification_interval == 0:
                     size_threshold = 60 if iteration > 30000 else None
-                    densify_grad_threshold = 0.0002 #min(opt.densify_grad_threshold * (iteration // 2000 + 1), 0.0005)
+                    densify_grad_threshold = opt.densify_grad_threshold
 
                     if iteration > 30000:
                         random_densify = True
