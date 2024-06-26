@@ -352,9 +352,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                
             # Densification
             if iteration < opt.densify_until_iter:
+                frustum_mask = render_pkg["frustum_mask"]
+                all_filter = torch.zeros_like(gaussians.max_radii2D, dtype=torch.bool).cuda()
+                all_filter[frustum_mask] = visibility_filter
                 # Keep track of max radii in image-space for pruning
-                gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+                gaussians.max_radii2D[all_filter] = torch.max(gaussians.max_radii2D[all_filter], radii[visibility_filter])
+                gaussians.add_densification_stats(viewspace_point_tensor, all_filter)
 
                 if iteration < 4000:
                     densification_interval = 100 
@@ -364,15 +367,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     densification_interval = 200
 
                 if iteration > opt.densify_from_iter and iteration % densification_interval == 0:
-                    size_threshold = 60 if iteration > 30000 else None                #改
+                    size_threshold = 40 if iteration > 5000 else None                #改
                     densify_grad_threshold = opt.densify_grad_threshold
 
-                    if iteration > 30000:
-                        random_densify = True
-                    else:
-                        random_densify = False
-
-                    gaussians.densify_and_prune(densify_grad_threshold, 0.05, scene.cameras_extent, size_threshold, random_densify=random_densify)
+                    gaussians.densify_and_prune(densify_grad_threshold, 0.05, scene.cameras_extent, size_threshold, frustum_mask=frustum_mask)
 
             # Optimizer step
             if iteration < opt.iterations:
@@ -466,8 +464,7 @@ def training_report(tb_writer, iteration, rgb_loss, loss, l1_loss, elapsed, test
 
         if tb_writer:
             gaussian_sdf = scene.gaussians.query_sdf(scene.gaussians.get_xyz)
-            shs = scene.gaussians.get_features.transpose(1, 2).reshape(-1, 3*(scene.gaussians.max_sh_degree+1)**2)
-            density = scene.gaussians.opacity_activation(gaussian_sdf, shs)
+            density = scene.gaussians.opacity_activation(gaussian_sdf)
             # _, sorted_scale = scene.gaussians.get_sorted_axis()
             # min_scales = sorted_scale[:, 0]
             # max_scales = sorted_scale[:, -1]
