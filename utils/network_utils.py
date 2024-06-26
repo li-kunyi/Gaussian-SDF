@@ -261,31 +261,20 @@ class Density(nn.Module):
         return self.density_func(sdf, beta=beta)
 
 
-class LaplaceDensitySH(Density):  # alpha * Laplace(loc=0, scale=beta).cdf(-sdf)
-    def __init__(self, params_init={}, beta_min=0.0001, in_dim=3):
+class LaplaceDensity(Density):  # alpha * Laplace(loc=0, scale=beta).cdf(-sdf)
+    def __init__(self, params_init={}, beta_min=0.0001):
         super().__init__(params_init=params_init)
         self.beta_min = torch.tensor(beta_min).cuda()
-
-        self.decoder = tcnn.Network(n_input_dims=in_dim,
-                                    n_output_dims=1,
-                                    network_config={
-                                    "otype": "CutlassMLP", # use CutlassMLP if not support FullyFusedMLP
-                                    "activation": "ReLU",
-                                    "output_activation": "None",
-                                    "n_neurons": 16,
-                                    "n_hidden_layers": 1})      
-
-    def density_func(self, sdf, shs=None, beta=None):
+    def density_func(self, sdf, beta=None):
         if beta is None:
             beta = self.get_beta()
 
-        # weight = torch.sigmoid(self.decoder(shs))
         alpha = self.get_alpha()
 
         # return alpha * torch.exp(-(sdf ** 2)/(2 * (beta ** 2)))
         # return torch.exp(- sdf / beta) / (1 + torch.exp(- sdf / beta)) ** 2
         # return alpha * (0.5 + 0.5 * sdf.sign() * torch.expm1(-sdf.abs() / beta))
-        return torch.clip(alpha * (0.5 + 0.5 * sdf.sign() * torch.expm1(-sdf.abs() / beta)), max=1.0)
+        return alpha * (0.5 + 0.5 * sdf.sign() * torch.expm1(-sdf.abs() / beta))
 
     def get_beta(self):
         # beta = torch.clip(self.beta.abs() + self.beta_min, min=0.01)
@@ -297,34 +286,6 @@ class LaplaceDensitySH(Density):  # alpha * Laplace(loc=0, scale=beta).cdf(-sdf)
         alpha = self.alpha
         return alpha
     
-class LaplaceDensity(Density):  # alpha * Laplace(loc=0, scale=beta).cdf(-sdf)
-    def __init__(self, params_init={}, beta_min=0.0001, in_dim=3):
-        super().__init__(params_init=params_init)
-        self.beta_min = torch.tensor(beta_min).cuda()
-
-    def density_func(self, sdf, shs=None, beta=None):
-        if beta is None:
-            beta = self.get_beta()
-
-        # alpha = torch.clip(self.alpha, max=1.0)
-        
-        # alpha = 1 / beta
-        alpha = self.get_alpha()
-
-        # return alpha * torch.exp(-(sdf ** 2)/(2 * (beta ** 2)))
-        # return 4 * torch.exp(- sdf / beta) / (1 + torch.exp(- sdf /sd beta)) ** 2
-        return (0.5 + 0.5 * sdf.sign() * torch.expm1(-sdf.abs() / beta))
-        # return torch.clip(alpha * (0.5 + 0.5 * sdf.sign() * torch.expm1(-sdf.abs() / beta)), max=1.0)
-
-    def get_beta(self):
-        # beta = torch.clip(self.beta.abs() + self.beta_min, min=0.01)
-        beta = self.beta.abs() + self.beta_min
-        return beta
-    
-    def get_alpha(self):
-        # alpha = torch.sigmoid(self.alpha)
-        alpha = self.alpha
-        return alpha
 
 class BellDensity(Density):  # alpha * Laplace(loc=0, scale=beta).cdf(-sdf)
     def __init__(self, params_init={}, beta_min=0.0001):

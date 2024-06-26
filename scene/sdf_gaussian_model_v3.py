@@ -13,7 +13,7 @@ from utils.general_utils import strip_symmetric, build_scaling_rotation, get_min
 import torch.nn.functional as F
 import trimesh
 from utils.vis_utils import save_points
-from utils.network_utils import LaplaceDensity, LaplaceDensitySH, SimpleSDF
+from utils.network_utils import LaplaceDensity, SimpleSDF
 from scene.appearance_network import AppearanceNetwork
 from scipy.spatial import cKDTree
 
@@ -57,7 +57,7 @@ class GaussianModel:
         self.setup_functions()
 
         # self.query_sdf = SimpleSDF(cfg, self.bounding_box, in_dim=3, out_dim=1, hidden_dim=32).cuda()
-        self.sdf2opacity = LaplaceDensitySH(**cfg['density'], in_dim=3*(self.max_sh_degree+1)**2).cuda()
+        self.sdf2opacity = LaplaceDensity(**cfg['density']).cuda()
         self.opacity_activation = self.sdf2opacity.density_func
 
         # appearance network and appearance embedding
@@ -677,7 +677,7 @@ class GaussianModel:
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         # self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
-    def densify_and_split(self, grads, grad_threshold,  grads_abs, grad_abs_threshold, scene_extent, N=2):
+    def densify_and_split(self, grads, grad_threshold, grads_abs, grad_abs_threshold, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
         padded_grad = torch.zeros((n_init_points), device="cuda")
@@ -710,7 +710,7 @@ class GaussianModel:
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
 
-    def densify_and_clone(self, grads, grad_threshold,  grads_abs, grad_abs_threshold, scene_extent):
+    def densify_and_clone(self, grads, grad_threshold, grads_abs, grad_abs_threshold, scene_extent):
         # Extract points that satisfy the gradient condition
         selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
         selected_pts_mask_abs = torch.where(torch.norm(grads_abs, dim=-1) >= grad_abs_threshold, True, False)
@@ -786,20 +786,22 @@ class GaussianModel:
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, random_densify=False):
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, frustum_mask=None):
         gaussian_sdf = self.query_sdf(self._xyz)
-        shs = self.get_features.transpose(1, 2).reshape(-1, 3*(self.max_sh_degree+1)**2)
-        density = self.opacity_activation(gaussian_sdf, shs)
-        opacity = density
+        opacity = self.opacity_activation(gaussian_sdf)
 
         prune_mask = (opacity < min_opacity).squeeze()
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
-            bound_mask1 = (gaussian_sdf < -0.1).squeeze()
-            bound_mask2 = (gaussian_sdf > 0.1).squeeze().squeeze()
+            
+            bound_mask1 = (gaussian_sdf < -0.01).squeeze()
+            bound_mask2 = (opacity >= 1.0).squeeze().squeeze()
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, bound_mask2), bound_mask1)
+
+            if frustum_mask is not None:
+                prune_mask = torch.logical_and(prune_mask, frustum_mask)
             
         self.prune_points(prune_mask)
         prune = self._xyz.shape[0]
@@ -818,9 +820,6 @@ class GaussianModel:
         
         self.densify_and_split(grads, max_grad, grads_abs, Q, extent)
         split = self._xyz.shape[0]
-
-        if random_densify:
-            self.random_densify(N=1000)
         
         # torch.cuda.empty_cache()
         return clone - before, split - clone, split - prune
