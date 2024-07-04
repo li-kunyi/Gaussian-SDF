@@ -247,17 +247,6 @@ def sdf_render_v2(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
     # proj_sdf_loss = F.l1_loss((proj_depth + valid_sdf) * mask, depth_sp * mask)
 
     # proj_normal_loss = (1 - (normal_sp * valid_min_axis).sum(dim=1)).mean()
-=======
-        means3D = means3D,
-        means2D = means2D,
-        shs = shs,
-        colors_precomp = colors_precomp,
-        opacities = opacity,
-        scales = scales,
-        rotations = rotations,
-        cov3D_precomp = cov3D_precomp,
-        view2gaussian_precomp=view2gaussian_precomp)
->>>>>>> b321df9f20043c6552f8686dc1df0c0956e847d6
 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
