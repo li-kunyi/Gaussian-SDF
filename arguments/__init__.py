@@ -93,7 +93,7 @@ class OptimizationParams(ParamGroup):
         self.beta_lr = 0.005
         self.appearance_embeddings_lr = 0.001
         self.appearance_network_lr = 0.001
-        self.densify_grad_threshold = 0.01  # 0.001 for tnt   #改0.002
+        self.densify_grad_threshold = 0.01  # 0.001 for tnt   #改0.0002
         self.densify_sdf_grad_threshold = 0.00
         self.percent_dense = 0.01
         
@@ -126,8 +126,8 @@ class OptimizationParams(ParamGroup):
         # self.network['pos']['n_bins'] = 16
         self.network['grid'] = {}
         self.network['grid']['method'] = 'HashGrid'
-        self.network['grid']['hash_size'] = 16                    #改
-        self.network['grid']['voxel_size'] = 0.005  # 0.1 for tnt   #改
+        self.network['grid']['hash_size'] = 16                    #改 16
+        self.network['grid']['voxel_size'] = 0.1  # 0.1 for tnt   #改 smoothness()对应更改
         self.network['density'] = {}
         self.network['density']['params_init'] = {}
         self.network['density']['beta_min'] = 0.0001

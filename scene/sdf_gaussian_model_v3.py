@@ -785,7 +785,7 @@ class GaussianModel:
         self.densification_postfix(new_xyz1, new_features_dc1, new_features_rest1, new_scaling1, new_rotation1)
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
-
+#gaigai  
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, frustum_mask=None):
         gaussian_sdf = self.query_sdf(self._xyz)
         opacity = self.opacity_activation(gaussian_sdf)
@@ -796,7 +796,7 @@ class GaussianModel:
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
             
-            bound_mask1 = (gaussian_sdf < -0.01).squeeze()
+            bound_mask1 = (gaussian_sdf < -0.01).squeeze()   # gaigai sdf过小裁剪
             bound_mask2 = (opacity >= 1.0).squeeze().squeeze()
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, bound_mask2), bound_mask1)
 

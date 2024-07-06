@@ -23,7 +23,8 @@ from PIL import Image
 from utils.loss_utils import l1_loss, ssim, get_loss_v2, tv_loss, smoothness
 from gaussian_renderer import sdf_render_v2, network_gui, get_sdf_loss_with_gaussian_depth
 import sys
-from scene import Scene, GaussianModel
+from scene import Scene
+from scene.sdf_gaussian_model_v3 import GaussianModel
 from utils.general_utils import safe_state
 import uuid
 # import marching_cubes as mcubes
@@ -162,6 +163,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         
         # rgb Loss
         gt_image = viewpoint_cam.original_image.cuda()
+
+        #gaigai 高斯 低通
+        
         
         Ll1 = l1_loss(image, gt_image)
         # use L1 loss for the transformed image if using decoupled appearance
@@ -299,7 +303,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 scene.save(iteration)
                 gaussians.save_model(f"{dataset.model_path}/point_cloud/iteration_{iteration}/model.pt")
 
-            if iteration > 200 and iteration % 1000 == 0:
+            if iteration > 200 and iteration % 3000 == 0:
                 # min_values, _ = torch.min(gaussians.get_xyz, dim=0)
                 # max_values, _ = torch.max(gaussians.get_xyz, dim=0)
                 # min_bound = min_values * 1.1
@@ -307,8 +311,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
                 max_bound = gaussians.bounding_box[:, 1]
                 min_bound = gaussians.bounding_box[:, 0]
-                vox_size = 0.01
-                grid_size = ((max_bound - min_bound) / vox_size).long() + 1  # [D, H, W]
+                # vox_size = 0.5    ###改
+                # grid_size = ((max_bound - min_bound) / vox_size).long() + 1  # [D, H, W]
+                grid_size = [512, 512, 512]
 
                 x = torch.linspace(min_bound[0], max_bound[0], grid_size[0])
                 y = torch.linspace(min_bound[1], max_bound[1], grid_size[1])
@@ -346,7 +351,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
                 mesh = trimesh.Trimesh(verts, faces, process=False)
                 # mesh.fill_holes()
-                mesh.export(f"{dataset.model_path}/sdf_v2_mesh_{iteration}.ply")
+                mesh.export(f"{dataset.model_path}/{TIMESTAMP}sdf_v2_mesh_{iteration}.ply")
                 print('Mesh saved')
                 
                
@@ -364,10 +369,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # elif iteration < 6000:
                 #     densification_interval = 200
                 else:
-                    densification_interval = 200
+                    densification_interval = 200   #gaigai
 
                 if iteration > opt.densify_from_iter and iteration % densification_interval == 0:
-                    size_threshold = 40 if iteration > 5000 else None                #改
+                    size_threshold = 40 if iteration > 50000 else None                #改
                     densify_grad_threshold = opt.densify_grad_threshold
 
                     gaussians.densify_and_prune(densify_grad_threshold, 0.05, scene.cameras_extent, size_threshold, frustum_mask=frustum_mask)

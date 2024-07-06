@@ -224,8 +224,8 @@ def get_loss_v2(render_pkg, depth_map, render_normal_map, opt):
     return loss
 
 
-
-def smoothness(gaussians, sample_points=32, voxel_size=0.05, margin=0.05):
+##voxel_size gaigai
+def smoothness(gaussians, sample_points=32, voxel_size=0.1, margin=0.05):
         '''
         Smoothness loss of feature grid
         '''

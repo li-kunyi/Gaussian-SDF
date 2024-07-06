@@ -217,7 +217,6 @@ def sdf_render_v2(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
 
     # Rasterize visible Gaussians to image, obtain their radii (on screen). 
     rendered_image, radii = rasterizer(
-<<<<<<< HEAD
         means3D=means3D.float(),
         means2D=means2D.float(),
         shs=shs,
@@ -259,13 +258,15 @@ def sdf_render_v2(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
             "frustum_mask": frustum_mask,
             }
 
+
+####gaigai
 def get_sdf_loss_with_gaussian_depth(gaussians, camera, depth, normal, 
-                                     n_pixel=10000, n_sample=12, n_sample_surface=5, 
+                                     n_pixel=1000, n_sample=12, n_sample_surface=5, 
                                      truncation=0.01, full_image=False, ray_sampling=True, 
                                      device='cuda'):  
     with torch.no_grad():
         H, W = depth.shape
-        fx = W / (2 * math.tan(camera.FoVx / 2))
+        fx = W / (2 * math.tan(camera.FoVx / 2)) ##
         fy = H / (2 * math.tan(camera.FoVy / 2))
         # fx = W * 0.7
         # fy = W * 0.7
