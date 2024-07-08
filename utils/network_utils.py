@@ -188,10 +188,13 @@ class DenseLayer(nn.Linear):
 class SimpleSDF(nn.Module):
     def __init__(self, cfg, boudning_box, in_dim=3, hidden_dim=32):
         super().__init__()
+        self.sigmoid_alpha = cfg['grid']['alpha']
         # Sparse parametric grid encoding
-        self.boudning_box = boudning_box
-        dim_max = (self.boudning_box[:,1] - self.boudning_box[:,0]).max()
-        self.resolution = int(dim_max / cfg['grid']['voxel_size'])
+        # self.boudning_box = boudning_box
+        # dim_max = (self.boudning_box[:,1] - self.boudning_box[:,0]).max()
+        # self.resolution = int(dim_max / cfg['grid']['voxel_size'])
+        self.resolution = cfg['grid']['resolution']
+
         self.grid_fn, self.grid_dim = get_encoder(cfg['grid']['method'], 
                                                   log2_hashmap_size=cfg['grid']['hash_size'], 
                                                   desired_resolution=self.resolution)
@@ -208,6 +211,10 @@ class SimpleSDF(nn.Module):
                                         "n_neurons": hidden_dim,
                                         "n_hidden_layers": 1})
         
+    def normalization(self, x):
+        # _p = (_x - self.boudning_box[:, 0]) / (self.boudning_box[:,1] - self.boudning_box[:,0])
+        return 1 / (1 + torch.exp(-self.sigmoid_alpha * x))
+        
     def forward(self, x, batch=10000):
         num = x.shape[0]
         out = []
@@ -217,13 +224,12 @@ class SimpleSDF(nn.Module):
             _x = x[start:end]
             if end - start > 0:
                 _x = _x.reshape(-1, 3)
-                _p = (_x - self.boudning_box[:, 0]) / (self.boudning_box[:,1] - self.boudning_box[:,0])
+                _p = self.normalization(_x)
                 _grid = self.grid_fn(_p)
                 # _pe = self.pe_fn(_p)
                 # out.append(self.decoder(torch.cat((_pe, _grid), dim=-1)))
                 out.append(self.decoder(_grid))
         out = torch.cat(out, dim=0).cuda()
-        # out = torch.sigmoid(out)
         return out
 
 class SH(nn.Module):

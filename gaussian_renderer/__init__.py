@@ -161,7 +161,7 @@ def sdf_render_v2(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
 
     with torch.no_grad():
         frustum_mask, _, _ = project_to_image(viewpoint_camera, pc.get_xyz)
-        
+
     means3D = pc.get_xyz
     means3D = means3D[frustum_mask]
 
@@ -227,6 +227,10 @@ def sdf_render_v2(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
         cov3D_precomp = cov3D_precomp,
         view2gaussian_precomp=view2gaussian_precomp)
 
+    gaussian_gradient = None
+    # gaussian_gradient = gradient(means3D, pc.query_sdf)
+    # gaussian_gradient = torch.norm(gaussian_gradient, dim=-1)
+
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
     return {"render": rendered_image,
@@ -236,19 +240,15 @@ def sdf_render_v2(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
             "gaussian_sdf": gaussian_sdf,
             "opacity": opacity,
             "frustum_mask": frustum_mask,
+            "gaussian_gradient": gaussian_gradient,
             }
 
-def get_sdf_loss_with_gaussian_depth(gaussians, camera, depth, normal, 
-                                     n_pixel=10000, n_sample=12, n_sample_surface=5, 
-                                     truncation=0.01, full_image=False, ray_sampling=True, 
+def get_sdf_loss_with_gaussian_depth(gaussians, c2w, fx, fy, depth, normal, 
+                                     n_pixel=2048, n_sample=96, n_sample_surface=21, 
+                                     truncation=0.1, full_image=False, ray_sampling=True, 
                                      device='cuda'):  
     with torch.no_grad():
         H, W = depth.shape
-        fx = W / (2 * math.tan(camera.FoVx / 2))
-        fy = H / (2 * math.tan(camera.FoVy / 2))
-        # fx = W * 0.7
-        # fy = W * 0.7
-        c2w = (camera.world_view_transform.T).inverse()
         R = c2w[:3, :3]
         T = c2w[:3, 3]
 
@@ -274,14 +274,9 @@ def get_sdf_loss_with_gaussian_depth(gaussians, camera, depth, normal,
 
         pts = rays_o[:, None, :] + rays_d[:, None, :] * z_vals[..., :, None]  # [n_rays, n_samples, 3]
 
-    bounding_box = gaussians.bounding_box
-    mask0 = (pts[..., 0] > bounding_box[0, 0]) * (pts[..., 0] < bounding_box[0, 1])
-    mask1 = (pts[..., 1] > bounding_box[1, 0]) * (pts[..., 1] < bounding_box[1, 1])
-    mask2 = (pts[..., 2] > bounding_box[2, 0]) * (pts[..., 2] < bounding_box[2, 1])
-    bound_mask = torch.logical_or(torch.logical_or(mask0, mask1), mask2)
-
     sdf = gaussians.query_sdf(pts.reshape(-1, 3)).reshape(pts.shape[0], pts.shape[1])
 
+    # before truncation
     front_mask = torch.where(z_vals < (depth_sp - truncation), torch.ones_like(z_vals), torch.zeros_like(z_vals))
     # after truncation
     back_mask = torch.where(z_vals > (depth_sp + truncation), torch.ones_like(z_vals), torch.zeros_like(z_vals))
@@ -289,10 +284,10 @@ def get_sdf_loss_with_gaussian_depth(gaussians, camera, depth, normal,
     depth_mask = torch.where(depth_sp > 0.0, torch.ones_like(depth_sp), torch.zeros_like(depth_sp))
 
     # Valid sdf region
-    sdf_mask = (1.0 - front_mask) * (1.0 - back_mask) * depth_mask * bound_mask
-    front_mask = front_mask * depth_mask * bound_mask
+    sdf_mask = (1.0 - front_mask) * (1.0 - back_mask) * depth_mask
+    front_mask = front_mask * depth_mask
 
-    zero_d_mask = torch.where(depth_sp < 0.1, torch.ones_like(depth_sp), torch.zeros_like(depth_sp)) * bound_mask
+    zero_d_mask = torch.where(depth_sp < 0.1, torch.ones_like(depth_sp), torch.zeros_like(depth_sp))
 
     volume_fs_loss = F.l1_loss(sdf * front_mask, torch.ones_like(sdf) * front_mask) + F.l1_loss(sdf * zero_d_mask, torch.ones_like(sdf) * zero_d_mask)
     volume_sdf_loss = F.l1_loss((z_vals + sdf) * sdf_mask, depth_sp * sdf_mask)
@@ -300,18 +295,18 @@ def get_sdf_loss_with_gaussian_depth(gaussians, camera, depth, normal,
     surface_normal_loss = torch.tensor(0).cuda()
     eikonal_loss = torch.tensor(0).cuda()
     normal_dir_loss = torch.tensor(0).cuda()
-    # if torch.count_nonzero(depth_mask) > 0:
-        # surface_gradient = gradient(surface_pts.reshape(-1, 3), gaussians.query_sdf)
+    if torch.count_nonzero(depth_mask) > 0:
+        surface_gradient = gradient(surface_pts.reshape(-1, 3), gaussians.query_sdf)
         # eikonal_loss = ((surface_gradient.norm(2, dim=-1)[:, None] * depth_mask - 1) ** 2).mean()
 
-        # surface_normal = torch.nn.functional.normalize(surface_gradient, p=2, dim=-1)
-        # surface_normal_loss = (1 - (normal_sp * surface_normal * depth_mask).sum(dim=1)).mean()
+        surface_normal = torch.nn.functional.normalize(surface_gradient, p=2, dim=-1)
+        surface_normal_loss = (1 - (normal_sp * surface_normal * depth_mask).sum(dim=1)).mean()
         # normal_dir_loss = torch.relu((rays_d * surface_normal * depth_mask).sum(dim=1)).mean()
 
     return volume_fs_loss, volume_sdf_loss, surface_normal_loss, normal_dir_loss, eikonal_loss
 
 
-def gradient(x, fn, voxel_size=0.0005):    
+def gradient(x, fn, voxel_size=0.05):    
     x = torch.reshape(x, [-1, x.shape[-1]]).float()
     eps = voxel_size / np.sqrt(3)
     k1 = torch.tensor([1, -1, -1], dtype=x.dtype, device=x.device)  

@@ -155,106 +155,55 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if (iteration - 1) == debug_from:
             pipe.debug = True
 
-        n_inner_iter = 2
-        for inner_iter in range(n_inner_iter):
-            render_pkg = sdf_render_v2(viewpoint_cam, gaussians, pipe, background, kernel_size=dataset.kernel_size)
-            rendering, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
-            
-            image = rendering[:3, :, :]
-            
-            # rgb Loss
-            gt_image = viewpoint_cam.original_image.cuda()
-            
-            Ll1 = l1_loss(image, gt_image)
-            # use L1 loss for the transformed image if using decoupled appearance
-            if dataset.use_decoupled_appearance:
-                Ll1 = L1_loss_appearance(image, gt_image, gaussians, viewpoint_cam.idx)
-            
-            rgb_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
-            
-            # depth distortion regularization
-            distortion_map = rendering[8, :, :]
-            distortion_map = get_edge_aware_distortion_map(gt_image, distortion_map)
-            distortion_loss = distortion_map.mean()
-            
-            # depth normal consistency
-            depth = rendering[6, :, :]
-            depth_normal, _ = depth_to_normal(viewpoint_cam, depth[None, ...])
-            depth_normal = depth_normal.permute(2, 0, 1)
-
-            render_normal = rendering[3:6, :, :]
-            render_normal = torch.nn.functional.normalize(render_normal, p=2, dim=0)
-            
-            c2w = (viewpoint_cam.world_view_transform.T).inverse()
-            normal2 = c2w[:3, :3] @ render_normal.reshape(3, -1)
-            render_normal_world = normal2.reshape(3, *render_normal.shape[1:])
-            
-            normal_error = 1 - (render_normal_world * depth_normal).sum(dim=0)
-            depth_normal_loss = normal_error.mean()
-
-            accumlated_alpha = rendering[7, :, :]
-            
-            lambda_distortion = opt.lambda_distortion if iteration >= opt.distortion_from_iter else 0.0
-            lambda_depth_normal = opt.lambda_depth_normal if iteration >= opt.depth_normal_from_iter else 0.0
-
-            # Final loss
-            loss = rgb_loss + depth_normal_loss * lambda_depth_normal + distortion_loss * lambda_distortion 
-
-            gaussian_sdf = render_pkg["gaussian_sdf"]
-            # gaussian_opacity = render_pkg["opacity"]
-
-            gaussian_sdf_loss = torch.abs(gaussian_sdf).mean()
-            # opacity_loss = torch.abs(gaussian_opacity).mean()  #torch.exp(-(gaussian_opacity) ** 2 / 0.05).mean()
-
-            if iteration > 600:
-                loss += 1.0 * gaussian_sdf_loss
-                tb_writer.add_scalar('train_loss_patches/gaussian_sdf_loss', gaussian_sdf_loss, iteration)
-
-            # if iteration > 600:
-            #     loss += 0.01 * opacity_loss
-
-            if iteration > 600:
-                H, W = depth.shape
-                if opt.use_tnt:
-                    fx = W * 0.7
-                    fy = W * 0.7
-                else:
-                    fx = W / (2 * math.tan(viewpoint_cam.FoVx / 2))
-                    fy = H / (2 * math.tan(viewpoint_cam.FoVy / 2))
-                
-                c2w = (viewpoint_cam.world_view_transform.T).inverse()
-                fs_loss, sdf_loss, surface_normal_loss, normal_dir_loss, eikonal_loss = get_sdf_loss_with_gaussian_depth(gaussians, c2w, fx, fy, 
-                                                                                depth, render_normal_world.permute(1, 2, 0),
-                                                                                n_pixel=opt.n_pixel, n_sample=opt.n_sample, n_sample_surface=opt.n_sample_surface, 
-                                                                                truncation=opt.truncation,
-                                                                                full_image=False, ray_sampling=True)
-                loss += 1000.0 * sdf_loss + 10. * fs_loss
-                # loss += 0.01 * eikonal_loss
-
-                if inner_iter == n_inner_iter - 1:  
-                    tb_writer.add_scalar('train_loss_patches/fs_loss', fs_loss, iteration)
-                    tb_writer.add_scalar('train_loss_patches/sdf_loss', sdf_loss, iteration)
-                    tb_writer.add_scalar('train_loss_patches/eikonal_loss', eikonal_loss, iteration)
-
-                
-            if iteration > 600:
-                loss += 0.1 * surface_normal_loss
-                loss += 0.1 * normal_dir_loss
-
-                if inner_iter == n_inner_iter - 1:    
-                    tb_writer.add_scalar('train_loss_patches/normal_dir_loss', normal_dir_loss, iteration)
-                    tb_writer.add_scalar('train_loss_patches/surface_normal_loss', surface_normal_loss, iteration)
-
-            if iteration > 600:
-                loss += 0.001 * smoothness(gaussians, sample_points=opt.smooth_sample_point, voxel_size=opt.smooth_voxel_size, margin=opt.smooth_voxel_size)
-            loss.backward()
-
-            if inner_iter < n_inner_iter - 1:    
-                gaussians.optimizer.step()
-                gaussians.optimizer.zero_grad()
-                gaussians.network_optimizer.step()
-                gaussians.network_optimizer.zero_grad()
+        render_pkg = sdf_render_v2(viewpoint_cam, gaussians, pipe, background, kernel_size=dataset.kernel_size)
+        rendering, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
         
+        image = rendering[:3, :, :]
+        
+        # rgb Loss
+        gt_image = viewpoint_cam.original_image.cuda()
+        
+        Ll1 = l1_loss(image, gt_image)
+        # use L1 loss for the transformed image if using decoupled appearance
+        if dataset.use_decoupled_appearance:
+            Ll1 = L1_loss_appearance(image, gt_image, gaussians, viewpoint_cam.idx)
+        
+        rgb_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+        
+        # depth distortion regularization
+        distortion_map = rendering[8, :, :]
+        distortion_map = get_edge_aware_distortion_map(gt_image, distortion_map)
+        distortion_loss = distortion_map.mean()
+        
+        # depth normal consistency
+        depth = rendering[6, :, :]
+        depth_normal, _ = depth_to_normal(viewpoint_cam, depth[None, ...])
+        depth_normal = depth_normal.permute(2, 0, 1)
+
+        render_normal = rendering[3:6, :, :]
+        render_normal = torch.nn.functional.normalize(render_normal, p=2, dim=0)
+        
+        c2w = (viewpoint_cam.world_view_transform.T).inverse()
+        normal2 = c2w[:3, :3] @ render_normal.reshape(3, -1)
+        render_normal_world = normal2.reshape(3, *render_normal.shape[1:])
+        
+        normal_error = 1 - (render_normal_world * depth_normal).sum(dim=0)
+        depth_normal_loss = normal_error.mean()
+
+        accumlated_alpha = rendering[7, :, :]
+        
+        lambda_distortion = opt.lambda_distortion if iteration >= opt.distortion_from_iter else 0.0
+        lambda_depth_normal = opt.lambda_depth_normal if iteration >= opt.depth_normal_from_iter else 0.0
+
+        loss = rgb_loss + depth_normal_loss * lambda_depth_normal + distortion_loss * lambda_distortion 
+
+        gaussian_sdf = render_pkg["gaussian_sdf"]
+        gaussian_sdf_loss = torch.abs(gaussian_sdf).mean()
+        loss += 1.0 * gaussian_sdf_loss
+        tb_writer.add_scalar('train_loss_patches/gaussian_sdf_loss', gaussian_sdf_loss, iteration)
+
+        loss.backward()
+
         iter_end.record()
 
         is_save_images = True
@@ -323,8 +272,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # min_bound = min_values * 1.1
                 # max_bound = max_values * 1.1
 
-                max_bound = gaussians.bounding_box[:, 1] / 4
-                min_bound = gaussians.bounding_box[:, 0] / 4
+                max_bound = gaussians.bounding_box[:, 1] / 8
+                min_bound = gaussians.bounding_box[:, 0] / 8
 
                 grid_size = ((max_bound - min_bound) / opt.vis_vox_size).long() + 1  # [D, H, W]
 
@@ -377,36 +326,75 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 gaussians.max_radii2D[all_filter] = torch.max(gaussians.max_radii2D[all_filter], radii[visibility_filter])
                 gaussians.add_densification_stats(viewspace_point_tensor, all_filter)
 
-                if iteration < 4000:
+                if iteration < 10000:
                     densification_interval = 100
                 else:
-                    densification_interval = 400
+                    densification_interval = 200
 
                 if iteration > opt.densify_from_iter and iteration % densification_interval == 0:
-                    size_threshold = 40 if iteration > 50000 else None
-                    densify_grad_threshold = opt.densify_grad_threshold
+                    size_threshold = 40 if iteration > 30000 else None
+                    if iteration < opt.start_train_sdf:
+                        densify_grad_threshold = opt.densify_grad_threshold
+                    else:
+                        densify_grad_threshold = opt.densify_grad_threshold * 2
 
                     sdf_mask = None
-                    if iteration > 50000:
-                        gaussian_gradient = render_pkg["gaussian_gradient"]
-                        sdf_mask = torch.zeros_like(gaussians.max_radii2D, dtype=torch.bool).cuda()
-                        sdf_mask[frustum_mask] = gaussian_gradient > gaussian_gradient.mean() * 10
+                    # if iteration > 50000:
+                    #     gaussian_gradient = render_pkg["gaussian_gradient"]
+                    #     sdf_mask = torch.zeros_like(gaussians.max_radii2D, dtype=torch.bool).cuda()
+                    #     sdf_mask[frustum_mask] = gaussian_gradient > gaussian_gradient.mean() * 10
 
-                    gaussians.densify_and_prune(densify_grad_threshold, 0.05, scene.cameras_extent, size_threshold, frustum_mask=frustum_mask, sdf_mask=sdf_mask)
+                    n_before, n_prune, n_clone, n_split = gaussians.densify_and_prune(densify_grad_threshold, 0.05, scene.cameras_extent, size_threshold, frustum_mask=frustum_mask, sdf_mask=sdf_mask)
+                    tb_writer.add_scalar('densify/prune', n_prune-n_before, iteration)
+                    tb_writer.add_scalar('densify/clone', n_clone-n_prune, iteration)
+                    tb_writer.add_scalar('densify/split', n_split-n_clone, iteration)
 
-            # Optimizer step
-            if iteration < opt.iterations:
-                gaussians.optimizer.step()
-                gaussians.optimizer.zero_grad(set_to_none = True)
-                gaussians.network_optimizer.step()
-                gaussians.network_optimizer.zero_grad()
+                    if iteration % 2000 == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                        gaussians.reset_sdf()
 
-                # if iteration % 2000 == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                #     gaussians.reset_sdf()
+        # Optimizer step
+        if iteration < opt.iterations:
+            gaussians.optimizer.step()
+            gaussians.optimizer.zero_grad(set_to_none = True)
+            gaussians.network_optimizer.step()
+            gaussians.network_optimizer.zero_grad()
 
-            if (iteration in checkpoint_iterations):
-                print("\n[ITER {}] Saving Checkpoint".format(iteration))
-                torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+            # SDF training
+            if iteration > opt.start_train_sdf:
+                for inner_iter in range(opt.n_inner_iter):
+                    H, W = depth.shape
+                    if opt.use_tnt:
+                        fx = W * 0.7
+                        fy = W * 0.7
+                    else:
+                        fx = W / (2 * math.tan(viewpoint_cam.FoVx / 2))
+                        fy = H / (2 * math.tan(viewpoint_cam.FoVy / 2))
+                    
+                    c2w = (viewpoint_cam.world_view_transform.T).inverse()
+                    fs_loss, sdf_loss, surface_normal_loss, normal_dir_loss, eikonal_loss = get_sdf_loss_with_gaussian_depth(gaussians, c2w, fx, fy, 
+                                                                                    depth, render_normal_world.permute(1, 2, 0),
+                                                                                    n_pixel=opt.n_pixel, n_sample=opt.n_sample, n_sample_surface=opt.n_sample_surface, 
+                                                                                    truncation=opt.truncation,
+                                                                                    full_image=False, ray_sampling=True)
+                    grid_loss = 1000.0 * sdf_loss + 10. * fs_loss
+                    # loss += 0.01 * eikonal_loss
+                    grid_loss += 0.1 * surface_normal_loss
+                    grid_loss += 0.1 * normal_dir_loss
+                    grid_loss += 0.001 * smoothness(gaussians, sample_points=opt.smooth_sample_point, voxel_size=opt.smooth_voxel_size, margin=opt.smooth_voxel_size)
+                    
+                    grid_loss.backward()
+                    gaussians.network_optimizer.step()
+                    gaussians.network_optimizer.zero_grad()
+
+                tb_writer.add_scalar('train_loss_patches/fs_loss', fs_loss, iteration)
+                tb_writer.add_scalar('train_loss_patches/sdf_loss', sdf_loss, iteration)
+                tb_writer.add_scalar('train_loss_patches/eikonal_loss', eikonal_loss, iteration)
+                tb_writer.add_scalar('train_loss_patches/normal_dir_loss', normal_dir_loss, iteration)
+                tb_writer.add_scalar('train_loss_patches/surface_normal_loss', surface_normal_loss, iteration)
+
+        if (iteration in checkpoint_iterations):
+            print("\n[ITER {}] Saving Checkpoint".format(iteration))
+            torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
 
     
