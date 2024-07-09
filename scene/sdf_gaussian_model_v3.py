@@ -677,7 +677,7 @@ class GaussianModel:
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
             
-            bound_mask1 = (gaussian_sdf < -0.01).squeeze()
+            bound_mask1 = (gaussian_sdf < -0.01).squeeze()   # gaigai sdf过小裁剪
             bound_mask2 = (opacity >= 1.0).squeeze().squeeze()
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, bound_mask2), bound_mask1)
 

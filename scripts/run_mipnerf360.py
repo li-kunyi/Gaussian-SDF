@@ -5,9 +5,15 @@ import GPUtil
 from concurrent.futures import ThreadPoolExecutor
 import time
 
-scenes = ["bicycle", "bonsai", "counter", "flowers", "garden", "stump", "treehill", "kitchen", "room"]
+os.environ["CUDA_VISIBLE_DEVICES"] = "7"
 
-factors = [4, 2, 2, 4, 4, 4, 4, 2, 2]
+# scenes = ["bicycle", "bonsai", "counter", "flowers", "garden", "stump", "treehill", "kitchen", "room"]
+
+# factors = [4, 2, 2, 4, 4, 4, 4, 2, 2]
+
+scenes = [ "garden"]
+
+factors = [ 4 ]
 
 excluded_gpus = set([])
 
@@ -17,21 +23,31 @@ dry_run = False
 
 jobs = list(zip(scenes, factors))
 
-def train_scene(gpu, scene, factor):
-    cmd = f"CUDA_LAUNCH_BLOCKING=1 OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES={gpu} python train.py -s 360_v2/{scene} -m {output_dir}/{scene} --eval -i images_{factor} --port {6109+int(gpu)}"
-    print(cmd)
-    if not dry_run:
-       os.system(cmd)
+import logging
 
-    cmd = f"OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES={gpu} python render.py -m {output_dir}/{scene} --data_device cpu --skip_train"
-    print(cmd)
-    if not dry_run:
-        os.system(cmd)
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+
+# 在关键点打印信息
+logger.debug("CUDA_VISIBLE_DEVICES: %s", os.environ.get('CUDA_VISIBLE_DEVICES'))
+
+
+def train_scene(gpu, scene, factor):
     
-    cmd = f"OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES={gpu} python metrics.py -m {output_dir}/{scene}"
-    print(cmd)
-    if not dry_run:
-        os.system(cmd)
+    # cmd = f"CUDA_LAUNCH_BLOCKING=1 OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=7 python train_sdf_v3.py -s /home/data/czy/3DGS/DATASET/360_v2/{scene} -m {output_dir}/{scene} --eval -i images_{factor} --port {6109+int(gpu)}"
+    # print(cmd)
+    # if not dry_run:
+    #    os.system(cmd)
+
+    # cmd = f"OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES={gpu} python render.py -m {output_dir}/{scene} --data_device cpu --skip_train"
+    # print(cmd)
+    # if not dry_run:
+    #     os.system(cmd)
+    
+    # cmd = f"OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES={gpu} python metrics.py -m {output_dir}/{scene}"
+    # print(cmd)
+    # if not dry_run:
+    #     os.system(cmd)
     
     cmd = f"OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES={gpu} python extract_mesh.py -m {output_dir}/{scene} --iteration 30000"
     print(cmd)

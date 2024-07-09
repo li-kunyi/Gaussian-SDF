@@ -6,7 +6,7 @@ from gaussian_renderer import render, integrate
 import random
 from tqdm import tqdm
 from argparse import ArgumentParser
-from arguments import ModelParams, PipelineParams, get_combined_args
+from arguments import ModelParams, PipelineParams, get_combined_args, OptimizationParams
 from gaussian_renderer import GaussianModel
 import numpy as np
 import trimesh
@@ -112,13 +112,14 @@ def marching_tetrahedra_with_binary_search(model_path, name, iteration, views, g
     # mesh.export(os.path.join(render_path, f"mesh_binary_search_interp.ply"))
     
 
-def extract_mesh(dataset : ModelParams, iteration : int, pipeline : PipelineParams):
+def extract_mesh(dataset : ModelParams, iteration : int, pipeline : PipelineParams, opt):
     with torch.no_grad():
-        gaussians = GaussianModel(dataset.sh_degree)
+        gaussians = GaussianModel(dataset.sh_degree, opt.network)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
         
         gaussians.load_ply(os.path.join(dataset.model_path, "point_cloud", f"iteration_{iteration}", "point_cloud.ply"))
-        
+        gaussians.load_model(os.path.join(dataset.model_path, "point_cloud", f"iteration_{iteration}", "model.pt"))
+
         bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
         kernel_size = dataset.kernel_size
@@ -130,6 +131,7 @@ if __name__ == "__main__":
     # Set up command line argument parser
     parser = ArgumentParser(description="Testing script parameters")
     model = ModelParams(parser, sentinel=True)
+    op = OptimizationParams(parser)
     pipeline = PipelineParams(parser)
     parser.add_argument("--iteration", default=30000, type=int)
     parser.add_argument("--quiet", action="store_true")
@@ -141,4 +143,4 @@ if __name__ == "__main__":
     torch.manual_seed(0)
     torch.cuda.set_device(torch.device("cuda:0"))
     
-    extract_mesh(model.extract(args), args.iteration, pipeline.extract(args))
+    extract_mesh(model.extract(args), args.iteration, pipeline.extract(args), op.extract(args))

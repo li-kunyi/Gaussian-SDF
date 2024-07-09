@@ -16,7 +16,7 @@ from utils.system_utils import searchForMaxIteration
 from scene.dataset_readers import sceneLoadTypeCallbacks
 from scene.sdf_gaussian_model_v3 import GaussianModel
 # from scene.gaussian_model import GaussianModel
-from scene.network import SpecModel
+# from scene.network import SpecModel
 from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
 
@@ -42,6 +42,8 @@ class Scene:
         self.train_cameras = {}
         self.test_cameras = {}
 
+        print(args.source_path)
+
         if os.path.exists(os.path.join(args.source_path, "sparse")):
             scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval)
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
@@ -50,6 +52,18 @@ class Scene:
         elif os.path.exists(os.path.join(args.source_path, "metadata.json")):
             print("Found metadata.json file, assuming multi scale Blender data set!")
             scene_info = sceneLoadTypeCallbacks["Multi-scale"](args.source_path, args.white_background, args.eval, args.load_allres)
+        elif os.path.exists(os.path.join(args.source_path, "transforms.json")):
+            print("Found transforms_train.json file, assuming Blender data set!")
+            scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval)
+        elif os.path.exists(os.path.join(args.source_path, "cameras_sphere.npz")):
+            print("Found cameras_sphere.npz file, assuming DTU data set!")
+            scene_info = sceneLoadTypeCallbacks["DTU"](args.source_path, "cameras_sphere.npz", "cameras_sphere.npz")
+        elif os.path.exists(os.path.join(args.source_path, "cameras.npz")):
+            print("Found cameras.npz file, assuming DTU data set!")
+            scene_info = sceneLoadTypeCallbacks["DTU"](args.source_path, "cameras.npz", "cameras.npz")      
+        elif os.path.exists(os.path.join(args.source_path, "bbox.txt")):
+            print("Found bbox.txt file, assuming NSVF Blender data set!")
+            scene_info = sceneLoadTypeCallbacks["NSVF"](args.source_path, args.white_background, args.eval)
         else:
             assert False, "Could not recognize scene type!"
 

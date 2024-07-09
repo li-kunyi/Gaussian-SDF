@@ -217,15 +217,35 @@ def sdf_render_v2(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
 
     # Rasterize visible Gaussians to image, obtain their radii (on screen). 
     rendered_image, radii = rasterizer(
-        means3D = means3D,
-        means2D = means2D,
-        shs = shs,
-        colors_precomp = colors_precomp,
-        opacities = opacity,
-        scales = scales,
-        rotations = rotations,
-        cov3D_precomp = cov3D_precomp,
-        view2gaussian_precomp=view2gaussian_precomp)
+        means3D=means3D.float(),
+        means2D=means2D.float(),
+        shs=shs,
+        colors_precomp=colors_precomp.float() if colors_precomp is not None else None,
+        opacities=opacity.float(),
+        scales=scales.float() if scales is not None else None,
+        rotations=rotations.float() if rotations is not None else None,
+        cov3D_precomp=cov3D_precomp.float() if cov3D_precomp is not None else None,
+        view2gaussian_precomp=view2gaussian_precomp.float() if view2gaussian_precomp is not None else None,
+)
+    
+    # sdf_gradient = gradient(means3D, pc.query_sdf)
+
+    # normal_map = rendered_image[3:6, :, :].permute(1, 2, 0)
+    # depth_map = rendered_image[6, :, :]
+    # alpha_map = rendered_image[7, :, :]
+    # sdf_loss, surface_normal_loss = get_sdf_loss_with_gaussian_depth(pc, viewpoint_camera, depth_map, alpha_map, normal_map,
+    #                                             full_image=False, ray_sampling=True)
+
+    # valid_indices, valid_coordinates, proj_depth = project_to_image(viewpoint_camera, means3D, min_axis, dir_pp_normalized)
+    # valid_sdf = gaussian_sdf[valid_indices, 0]
+    # valid_min_axis = min_axis[valid_indices, :]
+    # depth_sp = depth_map[valid_coordinates[:, 0], valid_coordinates[:, 1]]
+    # alpha_sp = alpha_map[valid_coordinates[:, 0], valid_coordinates[:, 1]]
+    # normal_sp = normal_map[valid_coordinates[:, 0], valid_coordinates[:, 1]]
+    # mask = (depth_sp > 0) * (alpha_sp > 0.2)
+    # proj_sdf_loss = F.l1_loss((proj_depth + valid_sdf) * mask, depth_sp * mask)
+
+    # proj_normal_loss = (1 - (normal_sp * valid_min_axis).sum(dim=1)).mean()
 
     gaussian_gradient = None
     # gaussian_gradient = gradient(means3D, pc.query_sdf)
@@ -242,6 +262,7 @@ def sdf_render_v2(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
             "frustum_mask": frustum_mask,
             "gaussian_gradient": gaussian_gradient,
             }
+
 
 def get_sdf_loss_with_gaussian_depth(gaussians, c2w, fx, fy, depth, normal, 
                                      n_pixel=2048, n_sample=96, n_sample_surface=21, 

@@ -14,12 +14,15 @@ from scene import Scene
 import os
 from tqdm import tqdm
 from os import makedirs
-from gaussian_renderer import render
+# from gaussian_renderer import render
+from gaussian_renderer import sdf_render_v2
 import torchvision
 from utils.general_utils import safe_state
 from argparse import ArgumentParser
-from arguments import ModelParams, PipelineParams, get_combined_args
-from gaussian_renderer import GaussianModel
+from arguments import ModelParams, PipelineParams, get_combined_args, OptimizationParams
+# from gaussian_renderer import GaussianModel
+from scene.sdf_gaussian_model_v3 import GaussianModel
+from argparse import ArgumentParser, Namespace
 
 def render_set(model_path, name, iteration, views, gaussians, pipeline, background, kernel_size, scale_factor):
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), f"test_preds_{scale_factor}")
@@ -29,15 +32,15 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
     makedirs(gts_path, exist_ok=True)
 
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
-        rendering = render(view, gaussians, pipeline, background, kernel_size=kernel_size)["render"]
+        rendering = sdf_render_v2(view, gaussians, pipeline, background, kernel_size=kernel_size)["render"]
         rendering = rendering[:3, :, :]
         gt = view.original_image[0:3, :, :]
         torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
 
-def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool):
+def render_sets(dataset, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, opt):
     with torch.no_grad():
-        gaussians = GaussianModel(dataset.sh_degree)
+        gaussians = GaussianModel(dataset.sh_degree, opt.network)  #add opt.network -czy
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
         gaussians.load_ply(os.path.join(dataset.model_path, "point_cloud", f"iteration_{iteration}", "point_cloud.ply"))
         gaussians.load_model(os.path.join(dataset.model_path, "point_cloud", f"iteration_{iteration}", "model.pt"))
@@ -54,16 +57,19 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
 if __name__ == "__main__":
     # Set up command line argument parser
     parser = ArgumentParser(description="Testing script parameters")
-    model = ModelParams(parser, sentinel=True)
+    # model = ModelParams(parser, sentinel=True)
     pipeline = PipelineParams(parser)
-    parser.add_argument("--iteration", default=-1, type=int)
+    lp = ModelParams(parser, sentinel=True)
+    op = OptimizationParams(parser)
+    parser.add_argument("--iteration", default=30000, type=int)
     parser.add_argument("--skip_train", action="store_true")
     parser.add_argument("--skip_test", action="store_true")
     parser.add_argument("--quiet", action="store_true")
+    # parser.add_argument("--start_checkpoint", type=str, default = None)
     args = get_combined_args(parser)
     print("Rendering " + args.model_path)
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
-    render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test)
+    render_sets(lp.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, op.extract(args))
