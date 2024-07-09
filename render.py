@@ -44,10 +44,6 @@ def render_sets(dataset, iteration : int, pipeline : PipelineParams, skip_train 
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
         gaussians.load_ply(os.path.join(dataset.model_path, "point_cloud", f"iteration_{iteration}", "point_cloud.ply"))
         gaussians.load_model(os.path.join(dataset.model_path, "point_cloud", f"iteration_{iteration}", "model.pt"))
-        # gaussians.oneupSHdegree()
-        # if checkpoint:
-        #     (model_params, first_iter) = torch.load(checkpoint)
-        #     gaussians.restore(model_params, opt)
         scale_factor = dataset.resolution
         bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")

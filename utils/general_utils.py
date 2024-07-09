@@ -375,8 +375,7 @@ def sample_along_rays(gt_depth, n_samples, n_surface, device):
     # for thoe with validate depth, sample near the surface
     gt_depth_surface = gt_none_zero.repeat(1, n_surface)  # [n_pixels, n_samples//2]
     t_vals_surface = torch.rand(n_surface).to(device)
-    # z_vals_surface_depth_none_zero = (gt_depth_surface - 0.05) * (1.-t_vals_surface) + (gt_depth_surface + 0.05) * (t_vals_surface)
-    z_vals_surface_depth_none_zero = (gt_depth_surface - 0.01) * (1.-t_vals_surface) + (gt_depth_surface + 0.01) * (t_vals_surface)
+    z_vals_surface_depth_none_zero = (gt_depth_surface * 0.98) * (1.-t_vals_surface) + (gt_depth_surface * 1.02) * (t_vals_surface)
     z_vals_near_surface = torch.zeros(gt_depth.shape[0], n_surface).to(device)
     gt_none_zero_mask = gt_none_zero_mask.squeeze(-1)
     z_vals_near_surface[gt_none_zero_mask, :] = z_vals_surface_depth_none_zero

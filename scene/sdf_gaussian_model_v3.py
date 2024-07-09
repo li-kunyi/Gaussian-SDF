@@ -16,6 +16,7 @@ from utils.vis_utils import save_points
 from utils.network_utils import LaplaceDensity, SimpleSDF
 from scene.appearance_network import AppearanceNetwork
 from scipy.spatial import cKDTree
+import open3d as o3d
 
 class GaussianModel:
 
@@ -66,51 +67,23 @@ class GaussianModel:
         std = 1e-4
         self._appearance_embeddings = nn.Parameter(torch.empty(2048, 64).cuda())
         self._appearance_embeddings.data.normal_(0, std)
-
-        # self.sdf_grid = nn.Parameter(self.grid_init(value=-1.))
-        # self.sdf_grid.requires_grad_(True)
         
 
-    def set_bbox(self, enlarge=1.2):
+    def set_bbox(self, enlarge=1.1):
         '''
         Get bounding box of current scene, enlarge a little bit.
         '''
-        with torch.no_grad():
-            min_values, _ = torch.min(self._xyz, dim=0)
-            max_values, _ = torch.max(self._xyz, dim=0)
+        with torch.no_grad():       
+            min_values, _ = torch.min(self.get_xyz, dim=0)
+            max_values, _ = torch.max(self.get_xyz, dim=0)
 
             min_point = min_values * enlarge
             max_point = max_values * enlarge
 
             self.bounding_box = torch.stack([min_point, max_point], dim=-1)
 
-    def grid_init(self, value=-10., vox_size=0.005):
-        """
-        Initialize the sdf grids.
-
-        Args:
-            cfg (dict): parsed config dict.
-        """
-        if self.vox_size == None:
-            self.vox_size = vox_size
-        min_bound = self.bounding_box[:, 0]
-        max_bound = self.bounding_box[:, 1]
-        grid_shape = torch.floor((max_bound - min_bound) / self.vox_size) + 1
-        grid_shape = list(map(int, (grid_shape).tolist()))
-
-        sdf_grid = torch.full(grid_shape, value, device='cuda')
-        return sdf_grid
-
-    # def query_sdf(self, xyz):
-    #     xyz_nor = xyz.clone()
-    #     xyz_nor[:, 0] = ((xyz[:, 0]-self.bounding_box[0, 0])/(self.bounding_box[0, 1]-self.bounding_box[0, 0]))*2-1.0
-    #     xyz_nor[:, 1] = ((xyz[:, 1]-self.bounding_box[1, 0])/(self.bounding_box[1, 1]-self.bounding_box[1, 0]))*2-1.0
-    #     xyz_nor[:, 2] = ((xyz[:, 2]-self.bounding_box[2, 0])/(self.bounding_box[2, 1]-self.bounding_box[2, 0]))*2-1.0
-    #     xyz_nor = torch.clip(xyz_nor, -1.0, 1.0)
-    #     vgrid = xyz_nor[None, None, :, None, :].float()
-
-    #     sdf = F.grid_sample(self.sdf_grid[None, None, ...], vgrid, padding_mode='border', align_corners=False).squeeze(0).squeeze(0).squeeze(0)
-    #     return sdf
+            # print(f"Corrected number of points: {self.get_xyz.shape[0]}")
+            print(f"Bounding box: {min_point.cpu().numpy()}, {max_point.cpu().numpy()}")
 
 
     def capture(self):
@@ -331,28 +304,24 @@ class GaussianModel:
 
         dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)
         scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
-        # scales[:, 0] = scales[:, 0] * 2
         rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
         rots[:, 0] = 1
-
-        # TODO: initialize as 0 or inf?
-        # sdf = 0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda")
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
         self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
-        # self._sdf = nn.Parameter(sdf.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
     def training_setup(self, training_args):
+        self.set_bbox()
+
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.xyz_gradient_accum_abs = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.xyz_gradient_accum_abs_max = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.set_bbox()
         self.query_sdf = SimpleSDF(self.cfg, self.bounding_box, in_dim=3, hidden_dim=32).cuda()
 
         l = [
@@ -362,8 +331,8 @@ class GaussianModel:
             # {'params': [self.sdf_grid], 'lr': training_args.opacity_lr, "name": "sdf"},
             {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
             {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"},
-            {'params': [self._appearance_embeddings], 'lr': training_args.appearance_embeddings_lr, "name": "appearance_embeddings"},
-            {'params': self.appearance_network.parameters(), 'lr': training_args.appearance_network_lr, "name": "appearance_network"},
+            # {'params': [self._appearance_embeddings], 'lr': training_args.appearance_embeddings_lr, "name": "appearance_embeddings"},
+            # {'params': self.appearance_network.parameters(), 'lr': training_args.appearance_network_lr, "name": "appearance_network"},
             # {'params': self.sdf2opacity.parameters(), 'lr': training_args.network_lr, "name": "beta"},
             {'params': list(self.query_sdf.parameters()),'lr': training_args.network_lr, "name": "sdf"}
         ]
@@ -493,40 +462,6 @@ class GaussianModel:
         return vertices, vertices_scale
     
     def reset_sdf(self):
-        # reset opacity to by considering 3D filter
-        # current_sdf = self.get_opacity
-        # sdf_new = torch.ones_like(current_sdf) * 0.
-        # sdf_new = sdf_new.squeeze(-1)
-
-        # indices = ((self._xyz - self.bounding_box[:, 0]) / self.vox_size)
-        # sdf_grid = self.grid_init(value=-10.)
-
-        # indices[:, 0] = torch.clip(indices[:, 0], 0, sdf_grid.shape[0])
-        # indices[:, 1] = torch.clip(indices[:, 1], 0, sdf_grid.shape[1])
-        # indices[:, 2] = torch.clip(indices[:, 2], 0, sdf_grid.shape[2])
-
-        # sdf_grid[torch.floor(indices[:, 0]).long(), torch.floor(indices[:, 1]).long(), torch.floor(indices[:, 2]).long()] = sdf_new
-        # sdf_grid[torch.ceil(indices[:, 0]).long(), torch.floor(indices[:, 1]).long(), torch.floor(indices[:, 2]).long()] = sdf_new
-        # sdf_grid[torch.floor(indices[:, 0]).long(), torch.ceil(indices[:, 1]).long(), torch.floor(indices[:, 2]).long()] = sdf_new
-        # sdf_grid[torch.floor(indices[:, 0]).long(), torch.floor(indices[:, 1]).long(), torch.ceil(indices[:, 2]).long()] = sdf_new
-        # sdf_grid[torch.ceil(indices[:, 0]).long(), torch.ceil(indices[:, 1]).long(), torch.floor(indices[:, 2]).long()] = sdf_new
-        # sdf_grid[torch.floor(indices[:, 0]).long(), torch.ceil(indices[:, 1]).long(), torch.ceil(indices[:, 2]).long()] = sdf_new
-        # sdf_grid[torch.ceil(indices[:, 0]).long(), torch.floor(indices[:, 1]).long(), torch.ceil(indices[:, 2]).long()] = sdf_new
-        # sdf_grid[torch.ceil(indices[:, 0]).long(), torch.ceil(indices[:, 1]).long(), torch.ceil(indices[:, 2]).long()] = sdf_new
-
-        # mask = torch.ones_like(self.sdf_grid).cuda()
-        # mask[torch.floor(indices[:, 0]).long(), torch.floor(indices[:, 1]).long(), torch.floor(indices[:, 2]).long()] = 0.
-        # mask = mask.bool().detach().cpu().numpy()
-
-        # distances = distance_transform_edt(~mask)
-        # sdf_full = distances
-        # # sdf_full[mask] = 10.0
-        # sdf_grid = torch.from_numpy(sdf_full)
-
-        # query_sdf = SimpleSDF(self.cfg, self.bounding_box, in_dim=3, hidden_dim=32).cuda()
-        # optimizable_tensors = self.replace_tensor_to_optimizer(list(query_sdf.parameters()), "sdf")
-        # self.query_sdf = optimizable_tensors["sdf"]
-
         self.sdf2opacity = LaplaceDensity(**self.cfg['density']).cuda()
         sdf_l = [{'params': self.sdf2opacity.parameters(), 'lr': self.network_lr, "name": "beta"}]
         self.network_optimizer = torch.optim.Adam(sdf_l, lr=0.0, eps=1e-15)
@@ -538,9 +473,6 @@ class GaussianModel:
         xyz = np.stack((np.asarray(plydata.elements[0]["x"]),
                         np.asarray(plydata.elements[0]["y"]),
                         np.asarray(plydata.elements[0]["z"])),  axis=1)
-        # sdf = np.asarray(plydata.elements[0]["sdf"])[..., np.newaxis]
-
-        # filter_3D = np.asarray(plydata.elements[0]["filter_3D"])[..., np.newaxis]
 
         features_dc = np.zeros((xyz.shape[0], 3, 1))
         features_dc[:, 0, 0] = np.asarray(plydata.elements[0]["f_dc_0"])
@@ -571,10 +503,8 @@ class GaussianModel:
         self._xyz = nn.Parameter(torch.tensor(xyz, dtype=torch.float, device="cuda").requires_grad_(True))
         self._features_dc = nn.Parameter(torch.tensor(features_dc, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
         self._features_rest = nn.Parameter(torch.tensor(features_extra, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
-        # self._sdf = nn.Parameter(torch.tensor(sdf, dtype=torch.float, device="cuda").requires_grad_(True))
         self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
-        # self.filter_3D = torch.tensor(filter_3D, dtype=torch.float, device="cuda")
 
         self.active_sh_degree = self.max_sh_degree
 
@@ -677,7 +607,7 @@ class GaussianModel:
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         # self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
-    def densify_and_split(self, grads, grad_threshold, grads_abs, grad_abs_threshold, scene_extent, N=2):
+    def densify_and_split(self, grads, grad_threshold, grads_abs, grad_abs_threshold, scene_extent, N=2, sdf_mask=None):
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
         padded_grad = torch.zeros((n_init_points), device="cuda")
@@ -689,12 +619,11 @@ class GaussianModel:
         selected_pts_mask = torch.logical_or(selected_pts_mask, selected_pts_mask_abs)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
-        # selected_pts_mask = torch.logical_or(selected_pts_mask, self.max_radii2D > 50)
 
-        # max_scales = torch.max(self.get_scaling, dim=1).values
-        # selected_pts_mask = torch.logical_or(selected_pts_mask, max_scales > 5 * max_scales.mean())
+        if sdf_mask is not None:
+            selected_pts_mask = torch.logical_or(selected_pts_mask, sdf_mask)
 
-        stds = self.get_scaling[selected_pts_mask].repeat(N,1)
+        stds = self.get_scaling[selected_pts_mask].repeat(N, 1)
         means =torch.zeros((stds.size(0), 3),device="cuda")
         samples = torch.normal(mean=means, std=stds)
         rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N,1,1)
@@ -736,60 +665,12 @@ class GaussianModel:
 
         self.max_radii2D = torch.cat((self.max_radii2D, self.max_radii2D[selected_pts_mask]), dim=0)
 
-    
-    def random_densify(self, N=1000):
-        min_values, _ = torch.min(self.get_xyz, dim=0)
-        max_values, _ = torch.max(self.get_xyz, dim=0)
-        length = max_values - min_values
-        center = (max_values + min_values) / 2
-        min_values = center - length * 1.1 / 2
-        max_values = center + length * 1.1 / 2
 
-        # max_values = self.bounding_box[:, 1]
-        # min_values = self.bounding_box[:, 0]
-
-        rand_x = torch.rand(N).cuda() * (max_values[0] - min_values[0]) + min_values[0]
-        rand_y = torch.rand(N).cuda() * (max_values[1] - min_values[1]) + min_values[1]
-        rand_z = torch.rand(N).cuda() * (max_values[2] - min_values[2]) + min_values[2]
-        new_xyz1 = torch.stack([rand_x, rand_y, rand_z], dim=-1)
-
-        _, sorted_scale = self.get_sorted_axis()
-        mean_scales = sorted_scale.mean(dim=0)
-        new_scaling1 = self.scaling_inverse_activation(mean_scales.repeat(N, 1))
-        new_rotation1 = torch.zeros((N, 4)).cuda()
-        new_rotation1[:, 0] = 1
-        features = torch.zeros((N, 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
-        features[:, :3, 0 ] = 1.0
-        features[:, 3:, 1:] = 0.0
-        new_features_dc1 = features[:,:,0:1].transpose(1, 2)
-        new_features_rest1 = features[:,:,1:].transpose(1, 2)
-
-        # indices = torch.randint(0, self.get_scaling.shape[0], (N,))
-        # stds = self.get_scaling[indices]
-        # means =torch.zeros((stds.size(0), 3),device="cuda")
-        # samples = torch.normal(mean=means, std=stds)
-        # rots = build_rotation(self._rotation[indices])
-        # new_xyz2 = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[indices]
-        # new_scaling2 = self.scaling_inverse_activation(self.get_scaling[indices])
-        # new_rotation2 = torch.zeros((N, 4)).cuda()
-        # new_rotation1[:, 0] = 1
-        # new_features_dc2 = torch.ones_like(self._features_dc[indices]).cuda()
-        # new_features_rest2 = torch.zeros_like(self._features_rest[indices]).cuda()
-
-        # new_xyz = torch.cat((new_xyz1, new_xyz2), dim=0)
-        # new_scaling = torch.cat((new_scaling1, new_scaling2), dim=0)
-        # new_rotation = torch.cat((new_rotation1, new_rotation2), dim=0)
-        # new_features_dc = torch.cat((new_features_dc1, new_features_dc2), dim=0)
-        # new_features_rest = torch.cat((new_features_rest1, new_features_rest2), dim=0)
-
-        self.densification_postfix(new_xyz1, new_features_dc1, new_features_rest1, new_scaling1, new_rotation1)
-        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
-
-#gaigai  
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, frustum_mask=None):
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, frustum_mask=None, sdf_mask=None):
         gaussian_sdf = self.query_sdf(self._xyz)
         opacity = self.opacity_activation(gaussian_sdf)
 
+        before = self._xyz.shape[0]
         prune_mask = (opacity < min_opacity).squeeze()
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
@@ -802,7 +683,7 @@ class GaussianModel:
 
             if frustum_mask is not None:
                 prune_mask = torch.logical_and(prune_mask, frustum_mask)
-            
+
         self.prune_points(prune_mask)
         prune = self._xyz.shape[0]
 
@@ -814,15 +695,14 @@ class GaussianModel:
         ratio = (torch.norm(grads, dim=-1) >= max_grad).float().mean()
         Q = torch.quantile(grads_abs.reshape(-1), 1 - ratio)
         
-        before = self._xyz.shape[0]
-        self.densify_and_clone(grads, max_grad, grads_abs, Q, extent)
+        self.densify_and_clone(grads, 2*max_grad, grads_abs, Q, extent)
         clone = self._xyz.shape[0]
         
-        self.densify_and_split(grads, max_grad, grads_abs, Q, extent)
+        self.densify_and_split(grads, max_grad, grads_abs, Q, extent, sdf_mask=sdf_mask)
         split = self._xyz.shape[0]
         
         # torch.cuda.empty_cache()
-        return clone - before, split - clone, split - prune
+        return before, prune, clone, split
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
