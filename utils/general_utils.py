@@ -427,3 +427,20 @@ def getVoxels(x_max, x_min, y_max, y_min, z_max, z_min, voxel_size=None, resolut
 
 
     return tx, ty, tz
+
+
+def gradient(x, fn, voxel_size=0.001):    
+    x = torch.reshape(x, [-1, x.shape[-1]]).float()
+    eps = voxel_size / np.sqrt(3)
+    k1 = torch.tensor([1, -1, -1], dtype=x.dtype, device=x.device)  
+    k2 = torch.tensor([-1, -1, 1], dtype=x.dtype, device=x.device)  
+    k3 = torch.tensor([-1, 1, -1], dtype=x.dtype, device=x.device)  
+    k4 = torch.tensor([1, 1, 1], dtype=x.dtype, device=x.device)  
+    
+    sdf1 = fn(x + k1 * eps)
+    sdf2 = fn(x + k2 * eps)
+    sdf3 = fn(x + k3 * eps)
+    sdf4 = fn(x + k4 * eps)
+    gradients = (k1 * sdf1 + k2 * sdf2 + k3 * sdf3 + k4 * sdf4) / (4.0 * eps)
+    
+    return gradients

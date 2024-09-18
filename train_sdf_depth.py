@@ -26,7 +26,7 @@ from utils.loss_utils import l1_loss, ssim, get_loss_v2, gradient_consistency_lo
 from gaussian_renderer import sdf_render_v2, sdf_render_v3, network_gui, get_sdf_loss_with_gaussian_depth, gradient
 import sys
 from scene import Scene, GaussianModel
-from utils.general_utils import safe_state
+from utils.general_utils import safe_state, get_expon_lr_func
 import uuid
 # import marching_cubes as mcubes
 from skimage.measure import marching_cubes
@@ -130,11 +130,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, save_ckp
         if camera.image_width >= 800:
             highresolution_index.append(index)
 
+    gaussians.compute_3D_filter(cameras=trainCameras)
+
     viewpoint_stack = None
     ema_loss_for_log = 0.0
     progress_bar = tqdm(range(first_iter, opt.iterations), initial=first_iter, total=opt.iterations, desc="Training progress")
     first_iter += 1
     align = {}
+    densify_grad_scheduler = get_expon_lr_func(lr_init=0.0002,
+                                    lr_final=0.0002,
+                                    max_steps=15_000)
     for iteration in range(first_iter, opt.iterations + 1):        
         torch.cuda.empty_cache()
         gaussians.update_learning_rate(iteration)
@@ -158,10 +163,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, save_ckp
         gt_depth_map_np = np.load(os.path.join(dataset.source_path, f'depth/{cur_name}.npy'))
         gt_depth_map_np = (gt_depth_map_np - gt_depth_map_np.min()) / (gt_depth_map_np.max() - gt_depth_map_np.min())
         depth_tensor = torch.from_numpy(gt_depth_map_np).unsqueeze(0).unsqueeze(0).cuda()
-        gt_depth_map = F.interpolate(depth_tensor, size=(H, W), mode='bilinear', align_corners=False).squeeze(0).squeeze(0)
-        inf_mask = (gt_depth_map < 0.005)
-        gt_depth_map[inf_mask] = 0.005
-        gt_depth_map = 1 / gt_depth_map
+        gt_depth_map = F.interpolate(depth_tensor, size=(H, W), mode='bilinear', align_corners=False).squeeze(0).squeeze(0)  # disparity
+        inf_mask = (gt_depth_map < 0.0001*gt_depth_map.max())
+        gt_depth_map = 1 / (gt_depth_map + 1e-10)
 
         iter_start.record()
 
@@ -225,36 +229,46 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, save_ckp
         # consistency loss
         consistency_loss, img_grad_weight = gradient_consistency_loss(depth_grad_mag, dx, dy, gt_image, image, normal=None, return_weight=True)
         
-        lambda_gradient_consistency = opt.lambda_gradient_consistency if iteration >= opt.depth_normal_from_iter else 0.0
+        lambda_gradient_consistency = opt.lambda_gradient_consistency if iteration >= opt.densify_until_iter else 0.0
         loss += lambda_gradient_consistency * consistency_loss
 
         # depth loss
-        weight = img_grad_weight * torch.exp(-depth / 10)
+        weight = img_grad_weight * torch.exp(-depth.clone().detach() * 0.05)
         aligned_depth = scale * gt_depth_map + shift
         depth_loss = (torch.log(1 + torch.abs(depth - aligned_depth)) * weight)[~inf_mask].mean()
-        loss += 0.05 * depth_loss
+        loss += 0.1 * depth_loss
 
         # normal loss
         gt_depth_normal, _ = depth_to_normal(viewpoint_cam, gt_depth_map[None, ...], return_depth_grad=False)
         gt_depth_normal = gt_depth_normal.permute(2, 0, 1)
 
-        normal_loss = (torch.abs(1 - (render_normal_world * gt_depth_normal).sum(dim=0)))[~inf_mask].mean()
-        loss += 0.05 * normal_loss 
+        normal_loss = (torch.abs(1 - (render_normal_world * gt_depth_normal).sum(dim=0)))[~inf_mask].mean() + (torch.abs((render_normal_world - gt_depth_normal).mean(dim=0)))[~inf_mask].mean()
+        loss += 0.1 * normal_loss 
+
+        # gaussian_opacity = render_pkg["opacity"]
+        # opacity_loss = torch.exp(-(gaussian_opacity - 0.5)**2).mean()
+        # if iteration > 2000:
+        #     loss += 0.05 * opacity_loss
 
         # SDF training
         if iteration > opt.start_train_sdf:
-            torch.cuda.empty_cache()
             H, W = depth.shape
             fx = W / (2 * math.tan(viewpoint_cam.FoVx / 2))
             fy = H / (2 * math.tan(viewpoint_cam.FoVy / 2))
             c2w = (viewpoint_cam.world_view_transform.T).inverse()
 
+            n_pixel = 1024 if iteration < opt.densify_until_iter else opt.n_pixel
+            n_sample = 0 if iteration < opt.densify_until_iter else opt.n_sample
+            n_sample_surface = opt.n_sample_surface
+            
             fs_loss, sdf_loss = get_sdf_loss_with_gaussian_depth(gaussians, c2w, fx, fy, 
-                                                                            depth, render_alpha,
-                                                                            n_pixel=opt.n_pixel, n_sample=opt.n_sample, n_sample_surface=opt.n_sample_surface, 
-                                                                            truncation=opt.truncation,
-                                                                            full_image=False, ray_sampling=True)
-            loss += opt.lambda_sdf * sdf_loss + opt.lambda_fs * fs_loss
+                                                                depth.clone().detach(),
+                                                                n_pixel=n_pixel, n_sample=n_sample, n_sample_surface=n_sample_surface, 
+                                                                truncation=opt.truncation,
+                                                                full_image=False, ray_sampling=True)
+            lambda_sdf = 1000.0 if iteration < opt.densify_until_iter else opt.lambda_sdf
+            lambda_fs = 0. if iteration < opt.densify_until_iter else opt.lambda_fs
+            loss += lambda_sdf * sdf_loss + lambda_fs * fs_loss
 
             # if opt.lambda_smooth > 0:
             #     loss += opt.lambda_smooth * smoothness(gaussians, sample_points=opt.smooth_sample_point, voxel_size=opt.smooth_voxel_size)
@@ -306,12 +320,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, save_ckp
             if iteration < opt.densify_until_iter:
                 # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter, render_pkg['frustum_mask'])
+                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
-                if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+                if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0 and visibility_filter.shape[0] < 3e6:
                     size_threshold = None
-                    densify_grad_threshold = opt.densify_grad_threshold
-                    gaussians.densify_and_prune(densify_grad_threshold, 0.05, scene.cameras_extent, size_threshold, iteration, z_prune=opt.z_prune)
+                    densify_grad_threshold = densify_grad_scheduler(iteration)
+                    if iteration > 4000:
+                        use_sdf_normal = True
+                    else:
+                        use_sdf_normal = False
+                    gaussians.densify_and_prune(densify_grad_threshold, 0.05, scene.cameras_extent, size_threshold, use_sdf_normal=use_sdf_normal)
+                    gaussians.compute_3D_filter(cameras=trainCameras)
+                    
+            if iteration % 100 == 0 and iteration > opt.densify_until_iter:
+                if iteration < opt.iterations - 100:
+                    # don't update in the end of training
+                    gaussians.compute_3D_filter(cameras=trainCameras)
 
         # Optimizer step
         if iteration < opt.iterations:
@@ -325,6 +349,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, save_ckp
         # Log and save
         with torch.no_grad():
             if (iteration in saving_iterations) and save_ckpt:
+            # if (iteration % 2000 == 0) and save_ckpt:
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)  # save gaussians
                 gaussians.save_model(f"{scene.model_path}/point_cloud/iteration_{iteration}/model.pt")  # save network
@@ -336,7 +361,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, save_ckp
             
             if (iteration + 1) % 10 == 0:
                 training_report(tb_writer, iteration+1, rgb_loss, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, sdf_render_v3, (pipe, background, dataset.kernel_size))
-    
+        
+        torch.cuda.empty_cache()
+
 def prepare_output_and_logger(args):    
     if not args.model_path:
         if os.getenv('OAR_JOB_ID'):

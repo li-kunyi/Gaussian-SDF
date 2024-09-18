@@ -275,7 +275,7 @@ def gradient_consistency_loss(depth_grad_magnitude, depth_grad_x, depth_grad_y, 
     tv_loss = tv_loss_x + tv_loss_y
 
     img_grad_loss = (torch.abs(gt_img_grad_x - img_grad_x)).mean() + (torch.abs(gt_img_grad_y - img_grad_y)).mean()
-    loss = 0.5 * tv_loss + img_grad_loss*0
+    loss = 0.5 * tv_loss + img_grad_loss
 
     if normal is not None:
         normal_grad_x, normal_grad_y = compute_image_gradients(normal)

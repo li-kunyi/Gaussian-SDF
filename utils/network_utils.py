@@ -349,8 +349,8 @@ class LaplaceDensity(Density):  # alpha * Laplace(loc=0, scale=beta).cdf(-sdf)
         return beta
     
     def get_alpha(self):
-        alpha = torch.sigmoid(self.alpha)
-        # alpha = self.alpha
+        # alpha = torch.sigmoid(self.alpha)
+        alpha = torch.clip(self.alpha, 0, 1)
         return alpha
     
 

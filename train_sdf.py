@@ -23,10 +23,10 @@ from random import randint
 import matplotlib.pyplot as plt
 from PIL import Image
 from utils.loss_utils import l1_loss, ssim, get_loss_v2, gradient_consistency_loss, smoothness
-from gaussian_renderer import sdf_render_v2, sdf_render_v3, network_gui, get_sdf_loss_with_gaussian_depth
+from gaussian_renderer import sdf_render_v2, sdf_render_v3, network_gui, get_sdf_loss_with_gaussian_depth, gradient
 import sys
 from scene import Scene, GaussianModel
-from utils.general_utils import safe_state
+from utils.general_utils import safe_state, get_expon_lr_func
 import uuid
 # import marching_cubes as mcubes
 from skimage.measure import marching_cubes
@@ -130,16 +130,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, save_ckp
         if camera.image_width >= 800:
             highresolution_index.append(index)
 
+    gaussians.compute_3D_filter(cameras=trainCameras)
+
     viewpoint_stack = None
     ema_loss_for_log = 0.0
     progress_bar = tqdm(range(first_iter, opt.iterations), initial=first_iter, total=opt.iterations, desc="Training progress")
     first_iter += 1
-    last_view = None
+    align = {}
+    densify_grad_scheduler = get_expon_lr_func(lr_init=0.0002,
+                                    lr_final=0.0002,
+                                    max_steps=15_000)
     for iteration in range(first_iter, opt.iterations + 1):        
         torch.cuda.empty_cache()
-
-        iter_start.record()
-
         gaussians.update_learning_rate(iteration)
 
         # Every 1000 its we increase the levels of SH up to a maximum degree
@@ -154,7 +156,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, save_ckp
         # Pick a random high resolution camera
         if random.random() < 0.3 and dataset.sample_more_highres:
             viewpoint_cam = trainCameras[highresolution_index[randint(0, len(highresolution_index)-1)]]
-            
+
+        iter_start.record()
+
+        gaussians.optimizer.zero_grad(set_to_none = True)
+        gaussians.network_optimizer.zero_grad()
+        gaussians.s2o_optimizer.zero_grad()
+
         # Render
         if (iteration - 1) == debug_from:
             pipe.debug = True
@@ -191,49 +199,44 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, save_ckp
         normal2 = c2w[:3, :3] @ render_normal.reshape(3, -1)
         render_normal_world = normal2.reshape(3, *render_normal.shape[1:])
         
-        normal_error = torch.abs(1 - (render_normal_world * depth_normal).sum(dim=0))
+        normal_error = torch.abs(1 - (render_normal_world * depth_normal).sum(dim=0)) 
         depth_normal_loss = normal_error.mean()
 
         render_alpha = rendering[7, :, :]
         
-        lambda_distortion = opt.lambda_distortion if (iteration >= opt.distortion_from_iter and (iteration // 3000) % 2 == 1) else 0.0
+        lambda_distortion = opt.lambda_distortion if iteration >= opt.distortion_from_iter else 0.0
         lambda_depth_normal = opt.lambda_depth_normal if iteration >= opt.depth_normal_from_iter else 0.0
 
         loss = rgb_loss + depth_normal_loss * lambda_depth_normal + distortion_loss * lambda_distortion 
 
-        if opt.lambda_gradient_consistency > 0:
-            _normal = render_normal_world if iteration >= opt.depth_normal_from_iter else None
-            consistency_loss = gradient_consistency_loss(depth_grad_mag, dx, dy, gt_image, image, normal=None)
-            loss += opt.lambda_gradient_consistency * consistency_loss    
+        # consistency loss
+        consistency_loss, img_grad_weight = gradient_consistency_loss(depth_grad_mag, dx, dy, gt_image, image, normal=None, return_weight=True)
+        
+        lambda_gradient_consistency = opt.lambda_gradient_consistency if iteration >= opt.densify_until_iter else 0.0
+        loss += lambda_gradient_consistency * consistency_loss
 
         # SDF training
         if iteration > opt.start_train_sdf:
-            torch.cuda.empty_cache()
-            n_inner_iter = opt.n_inner_iter
-            for inner_iter in range(n_inner_iter):
-                H, W = depth.shape
-                fx = W / (2 * math.tan(viewpoint_cam.FoVx / 2))
-                fy = H / (2 * math.tan(viewpoint_cam.FoVy / 2))
-                c2w = (viewpoint_cam.world_view_transform.T).inverse()
+            H, W = depth.shape
+            fx = W / (2 * math.tan(viewpoint_cam.FoVx / 2))
+            fy = H / (2 * math.tan(viewpoint_cam.FoVy / 2))
+            c2w = (viewpoint_cam.world_view_transform.T).inverse()
 
-                n_pixel = 2048 if iteration < opt.densify_until_iter else opt.n_pixel
-                n_sample = opt.n_sample
-                n_sample_surface = opt.n_sample_surface
-                fs_loss, sdf_loss = get_sdf_loss_with_gaussian_depth(gaussians, c2w, fx, fy, 
-                                                                                depth, render_alpha,
-                                                                                n_pixel=n_pixel, n_sample=n_sample, n_sample_surface=n_sample_surface, 
-                                                                                truncation=opt.truncation,
-                                                                                full_image=False, ray_sampling=True)
-                lambda_sdf = 10.0 if iteration < opt.densify_until_iter else opt.lambda_sdf
-                lambda_fs = 1. if iteration < opt.densify_until_iter else opt.lambda_fs
-                loss += lambda_sdf * sdf_loss + lambda_fs * fs_loss
+            n_pixel = 1024 if iteration < opt.densify_until_iter else opt.n_pixel
+            n_sample = 0 if iteration < opt.densify_until_iter else opt.n_sample
+            n_sample_surface = opt.n_sample_surface
+            
+            fs_loss, sdf_loss = get_sdf_loss_with_gaussian_depth(gaussians, c2w, fx, fy, 
+                                                                depth.clone().detach(),
+                                                                n_pixel=n_pixel, n_sample=n_sample, n_sample_surface=n_sample_surface, 
+                                                                truncation=opt.truncation,
+                                                                full_image=False, ray_sampling=True)
+            lambda_sdf = 1000.0 if iteration < opt.densify_until_iter else opt.lambda_sdf
+            lambda_fs = 0. if iteration < opt.densify_until_iter else opt.lambda_fs
+            loss += lambda_sdf * sdf_loss + lambda_fs * fs_loss
 
-                if opt.lambda_smooth > 0 and iteration > opt.densify_until_iter:
-                    loss += opt.lambda_smooth * smoothness(gaussians, sample_points=opt.smooth_sample_point, voxel_size=opt.smooth_voxel_size)
-
-            with torch.no_grad():   
-                tb_writer.add_scalar('train_loss_patches/fs_loss', fs_loss.item(), iteration)
-                tb_writer.add_scalar('train_loss_patches/sdf_loss', sdf_loss.item(), iteration)     
+            # if opt.lambda_smooth > 0:
+            #     loss += opt.lambda_smooth * smoothness(gaussians, sample_points=opt.smooth_sample_point, voxel_size=opt.smooth_voxel_size)
 
         loss.backward()
 
@@ -278,26 +281,27 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, save_ckp
             if iteration < opt.densify_until_iter:
                 # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter, render_pkg['frustum_mask'])
+                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
-                if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                    size_threshold = 20 if iteration > 30000 else None
-                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.05, scene.cameras_extent, size_threshold, iteration=iteration, z_prune=opt.z_prune)
+                if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0 and visibility_filter.shape[0] < 3e6:
+                    size_threshold = None
+                    densify_grad_threshold = densify_grad_scheduler(iteration)
 
-                # if iteration % 3000 == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                #     gaussians.reset_sdf()
+                    gaussians.densify_and_prune(densify_grad_threshold, 0.05, scene.cameras_extent, size_threshold, use_sdf_normal=False)
+                    gaussians.compute_3D_filter(cameras=trainCameras)
+                    
+            if iteration % 100 == 0 and iteration > opt.densify_until_iter:
+                if iteration < opt.iterations - 100:
+                    # don't update in the end of training
+                    gaussians.compute_3D_filter(cameras=trainCameras)
 
         # Optimizer step
         if iteration < opt.iterations:
             gaussians.optimizer.step()
-            gaussians.optimizer.zero_grad(set_to_none = True)
             gaussians.network_optimizer.step()
-            gaussians.network_optimizer.zero_grad()
 
             if iteration > opt.start_train_sdf:
                 gaussians.s2o_optimizer.step()
-                gaussians.s2o_optimizer.zero_grad()
-            
 
         # Log and save
         with torch.no_grad():
@@ -313,7 +317,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, save_ckp
             
             if (iteration + 1) % 10 == 0:
                 training_report(tb_writer, iteration+1, rgb_loss, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, sdf_render_v3, (pipe, background, dataset.kernel_size))
-    
+        
+        torch.cuda.empty_cache()
+
 def prepare_output_and_logger(args):    
     if not args.model_path:
         if os.getenv('OAR_JOB_ID'):
@@ -400,8 +406,6 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--save_ckpt", action='store_true', default=False)  # save checkpoint 
     parser.add_argument("--ckpt_pth", type=str, default = None)  # load checkpoint
-    parser.add_argument('--den_interval', type=int, default=100)
-
 
     args = parser.parse_args(sys.argv[1:])
 
@@ -416,9 +420,6 @@ if __name__ == "__main__":
     # args.eval = True
     # args.save_ckpt = True
     # args.ckpt_pth = 'outputs/360/garden/ckpt/ckpt_1.pth'
-
-    op.densification_interval = args.den_interval
-    args.densification_interval = args.den_interval
 
     print("Optimizing " + args.model_path)
     if args.save_ckpt:

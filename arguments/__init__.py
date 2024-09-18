@@ -94,8 +94,8 @@ class OptimizationParams(ParamGroup):
         self.densify_grad_threshold = 0.0002 # 0.0002
         self.percent_dense = 0.01
         
-        self.distortion_from_iter = 10_000
-        self.depth_normal_from_iter = 15_000
+        self.distortion_from_iter = 500
+        self.depth_normal_from_iter = 500
         self.densification_interval = 100
         self.opacity_reset_interval = 3000
         self.densify_from_iter = 500
@@ -120,8 +120,8 @@ class OptimizationParams(ParamGroup):
         self.network['pos']['n_bins'] = 16
         self.network['grid'] = {}
         self.network['grid']['method'] = 'HashGrid'
-        self.network['grid']['hash_size'] = 22
-        self.network['grid']['voxel_size'] = 0.01
+        self.network['grid']['hash_size'] = 18
+        self.network['grid']['voxel_size'] = 0.02
         self.network['density'] = {}
         self.network['density']['params_init'] = {}
         self.network['density']['beta_min'] = 0.00001
@@ -131,14 +131,14 @@ class OptimizationParams(ParamGroup):
         # SDF loss
         self.n_pixel = 4096
         self.n_sample = 32
-        self.n_sample_surface = 21
+        self.n_sample_surface = 11
         self.truncation = 0.02
         # smooth loss
         self.smooth_sample_point = 64
         self.smooth_voxel_size = 5 * self.network['grid']['voxel_size']
         # for SDF grid training
         self.n_inner_iter = 1
-        self.start_train_sdf = 15_000
+        self.start_train_sdf = 2000
         self.ckpt_every = 5_000
 
         self.z_prune = False

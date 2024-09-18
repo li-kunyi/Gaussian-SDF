@@ -245,7 +245,7 @@ def sdf_render_v2(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
             }
 
 
-def sdf_render_v3(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, kernel_size: float, scaling_modifier = 1.0, override_color = None, subpixel_offset=None):
+def sdf_render_v3(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, kernel_size: float, scaling_modifier = 1.0, subpixel_offset=None):
     """
     Render the scene. 
     
@@ -288,14 +288,9 @@ def sdf_render_v3(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
     means3D = pc.get_xyz
     means2D = screenspace_points
 
-    with torch.no_grad():
-        frustum_mask, _, _ = project_to_image(viewpoint_camera, pc.get_xyz)
-
-    gaussian_sdf = pc.query_sdf(means3D[frustum_mask])
-    mask_opacity = torch.clip(pc.opacity_activation(gaussian_sdf), max=1.0)
-
-    opacity = torch.zeros_like(pc.get_xyz[:, :1], dtype=pc.get_xyz.dtype, device="cuda")
-    opacity[frustum_mask] = mask_opacity
+    xyz_detach = means3D.clone().detach()
+    gaussian_sdf = pc.query_sdf(xyz_detach)
+    opacity = torch.clip(pc.opacity_activation(gaussian_sdf), max=1.0) * pc.get_opacity_with_3D_filter
 
     # If precomputed 3d covariance is provided, use it. If not, then it will be computed from
     # scaling / rotation by the rasterizer.
@@ -306,7 +301,8 @@ def sdf_render_v3(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
         cov3D_precomp = pc.get_covariance(scaling_modifier)
         cov3D_precomp = cov3D_precomp
     else:
-        scales = pc.get_scaling
+        # scales = pc.get_scaling
+        scales = pc.get_scaling_with_3D_filter
         rotations = pc.get_rotation
 
     view2gaussian_precomp = None
@@ -354,40 +350,38 @@ def sdf_render_v3(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
             "visibility_filter" : radii > 0,
             "radii": radii,
             "gaussian_sdf": gaussian_sdf,
-            "opacity": mask_opacity,
+            "opacity": opacity,
             "gaussian_gradient": gaussian_gradient,
-            "frustum_mask": frustum_mask,
             }
 
-def get_sdf_loss_with_gaussian_depth(gaussians, c2w, fx, fy, depth, alpha,
+def get_sdf_loss_with_gaussian_depth(gaussians, c2w, fx, fy, depth,
                                      n_pixel=2048, n_sample=96, n_sample_surface=21,
-                                     truncation=0.05, full_image=False, ray_sampling=True, 
+                                     truncation=0.1, full_image=False, ray_sampling=True, 
                                      device='cuda'):  
-    with torch.no_grad():
-        H, W = depth.shape
-        R = c2w[:3, :3]
-        T = c2w[:3, 3]
 
-        if full_image:
-            rays_o, rays_d = get_all_rays(H, W, fx, fy, (W)/2, (H)/2, R, T, device)
-            rays_o = rays_o.reshape(-1, 3)  # [N, 3]
-            rays_d = rays_d.reshape(-1, 3)
-            sp = torch.cat((depth[..., None], alpha[:, :, None]), dim=-1).reshape(-1, 5)
-        else:
-        
-            rays_o, rays_d, sp = get_samples(0, H-0, 0, W-0, n_pixel, fx, fy, (W-1)/2, (H-1)/2, R, T,
-                                            torch.cat((depth[:, :, None], alpha[:, :, None]), dim=-1),
-                                            device)  # [n_pixels, C]
-        
-        depth_sp = sp[..., 0:1]
-        alpha_sp = sp[..., 1:2]
+    H, W = depth.shape
+    R = c2w[:3, :3]
+    T = c2w[:3, 3]
 
-        if ray_sampling:
-            z_vals_surface, z_vals = sample_along_rays(depth_sp, n_sample, n_sample_surface, device, truncation=truncation)  # [n_pixels, n_samples]
-        else:
-            z_vals = depth_sp
+    if full_image:
+        rays_o, rays_d = get_all_rays(H, W, fx, fy, (W)/2, (H)/2, R, T, device)
+        rays_o = rays_o.reshape(-1, 3)  # [N, 3]
+        rays_d = rays_d.reshape(-1, 3)
+        sp = depth[..., None].reshape(-1, 5)
+    else:
+    
+        rays_o, rays_d, sp = get_samples(0, H-0, 0, W-0, n_pixel, fx, fy, (W-1)/2, (H-1)/2, R, T,
+                                        depth[:, :, None],
+                                        device)  # [n_pixels, C]
+    
+    depth_sp = sp[..., 0:1]
 
-        pts = rays_o[:, None, :] + rays_d[:, None, :] * z_vals[..., :, None]  # [n_rays, n_samples, 3]
+    if ray_sampling:
+        z_vals_surface, z_vals = sample_along_rays(depth_sp, n_sample, n_sample_surface, device, truncation=truncation)  # [n_pixels, n_samples]
+    else:
+        z_vals = depth_sp
+
+    pts = rays_o[:, None, :] + rays_d[:, None, :] * z_vals[..., :, None]  # [n_rays, n_samples, 3]
 
     sdf = gaussians.query_sdf(pts.reshape(-1, 3)).reshape(pts.shape[0], pts.shape[1])
 
@@ -397,7 +391,6 @@ def get_sdf_loss_with_gaussian_depth(gaussians, c2w, fx, fy, depth, alpha,
     back_mask = torch.where(z_vals > (depth_sp + truncation), torch.ones_like(z_vals), torch.zeros_like(z_vals))
     # valid mask
     depth_mask = torch.where(depth_sp > 0.0, torch.ones_like(depth_sp), torch.zeros_like(depth_sp))
-    # alpha_mask = torch.where(alpha_sp > 0.0, torch.ones_like(alpha_sp), torch.zeros_like(alpha_sp))
 
     # Valid sdf region
     sdf_mask = (1.0 - front_mask) * (1.0 - back_mask) * depth_mask
@@ -472,8 +465,8 @@ def project_to_image(viewpoint_camera, pts, device="cuda"):
     transformed_pts = (rel_w2c @ pts4.T).T[:, :3]
     u, v, d = transformed_pts[:, 0], transformed_pts[:, 1], transformed_pts[:, 2]
     image_coordinates = (K @ (torch.stack([u / d, v / d, d / d], dim=1)).T).T[:, :2]
-    valid_indices = (image_coordinates[:, 0] > -10) & (image_coordinates[:, 0] < W+10) & \
-                    (image_coordinates[:, 1] > -10) & (image_coordinates[:, 1] < H+10) & \
+    valid_indices = (image_coordinates[:, 0] > 0) & (image_coordinates[:, 0] < W - 1) & \
+                    (image_coordinates[:, 1] > 0) & (image_coordinates[:, 1] < H - 1) & \
                     (d > 0)
     valid_coordinates = torch.round(image_coordinates[valid_indices, :]).long()
     proj_depth = d[valid_indices]
