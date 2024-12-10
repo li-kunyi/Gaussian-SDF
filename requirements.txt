@@ -1,0 +1,10 @@
+open3d==0.10.0
+plyfile
+ninja
+GPUtil
+opencv-python
+lpips
+trimesh==4.3.2
+scikit-image
+tensorflow
+mediapy==1.1.2
